@@ -160,6 +160,11 @@ class Xception(nn.Module):
         x = self.fc(x)
         return x
 
+# -------------------- Factory function (compatibility) --------------------
+def create_model(num_classes=2):
+    """Create Xception model for compatibility with train scripts"""
+    return Xception(num_classes=num_classes)
+
 # -------------------- Quick test --------------------
 if __name__ == "__main__":
     model = Xception(num_classes=2)
@@ -167,3 +172,8 @@ if __name__ == "__main__":
     y = model(x)
     print("Output:", y.shape)
     print("Params (M):", sum(p.numel() for p in model.parameters()) / 1e6)
+    
+    # Test with 224x224 (more common)
+    x224 = torch.randn(1, 3, 224, 224)
+    y224 = model(x224)
+    print("Output 224x224:", y224.shape)
