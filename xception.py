@@ -1,217 +1,169 @@
-# train.py
-import os, argparse, time, math, random
-from pathlib import Path
-
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, WeightedRandomSampler
-from torchvision import datasets, transforms
 
-# ------------------------- Utils -------------------------
-def set_seed(seed: int = 42):
-    random.seed(seed); torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = False
-    torch.backends.cudnn.benchmark = True  # tăng tốc cho conv
+# -------------------- Tiện ích: Separable Conv (Depthwise + Pointwise) --------------------
+class SeparableConv2d(nn.Module):
+    """
+    Depthwise separable conv như trong Xception:
+    - Depthwise: groups = in_channels
+    - Pointwise: 1x1 để trộn kênh
+    Thứ tự theo paper: ReLU -> SeparableConv -> BN (đặt ReLU ngoài block).
+    Ở đây mình để conv + BN, còn ReLU được đặt trước khi gọi block (pre-activation style trong các flow).
+    """
+    def __init__(self, in_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=False):
+        super().__init__()
+        self.depthwise = nn.Conv2d(in_ch, in_ch, kernel_size, stride, padding,
+                                   groups=in_ch, bias=bias)
+        self.pointwise = nn.Conv2d(in_ch, out_ch, kernel_size=1, bias=bias)
+        self.bn = nn.BatchNorm2d(out_ch)
 
-def get_device():
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    def forward(self, x):
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        x = self.bn(x)
+        return x
 
-def infer_dataset_name(root: str):
-    return Path(root).resolve().name
+# -------------------- Xception Block (một residual unit) --------------------
+class XceptionBlock(nn.Module):
+    """
+    Một block chuẩn gồm:
+    - (ReLU -> SepConv -> ReLU -> SepConv -> [ReLU -> SepConv])  tùy số layers
+    - Optional: downsample bằng stride ở conv cuối (khớp paper: stride 2 ở một số block)
+    - Skip: Identity hoặc 1x1 Conv (stride theo block) để match shape
+    """
+    def __init__(self, in_ch, out_ch, reps, stride=1, grow_first=True):
+        super().__init__()
+        assert reps >= 1
+        layers = []
+        ch_in = in_ch
+        ch_out = out_ch
 
-# ------------------------- Transforms -------------------------
-IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD  = [0.229, 0.224, 0.225]
+        # “Grow first”: conv đầu tiên tăng số kênh lên out_ch, theo paper
+        if grow_first:
+            layers += [
+                nn.ReLU(inplace=True),
+                SeparableConv2d(ch_in, ch_out, 3, 1, 1),
+            ]
+            ch_in = ch_out
 
-def build_transforms(img_size: int):
-    train_tfms = transforms.Compose([
-        transforms.RandomResizedCrop(img_size, scale=(0.8, 1.0), ratio=(0.75, 1.33)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-    ])
-    eval_tfms = transforms.Compose([
-        transforms.Resize(int(img_size*1.14)),   # ≈ 256 cho 224
-        transforms.CenterCrop(img_size),
-        transforms.ToTensor(),
-        transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-    ])
-    return train_tfms, eval_tfms
+        # Các repetition ở giữa (nếu có)
+        for _ in range(reps - 1):
+            layers += [
+                nn.ReLU(inplace=True),
+                SeparableConv2d(ch_in, ch_in, 3, 1, 1),
+            ]
 
-# ------------------------- Data -------------------------
-def make_loaders(data_root: str, img_size: int, batch_size: int, num_workers: int,
-                 balance: bool = False):
-    train_tfms, eval_tfms = build_transforms(img_size)
+        # Conv cuối cùng: có thể downsample bằng stride (áp dụng ở một số block entry/exit)
+        layers += [
+            nn.ReLU(inplace=True),
+            SeparableConv2d(ch_in, ch_out, 3, stride=stride, padding=1),
+        ]
 
-    train_dir = os.path.join(data_root, "train")
-    val_dir   = os.path.join(data_root, "val")
-    test_dir  = os.path.join(data_root, "test")
+        self.body = nn.Sequential(*layers)
 
-    train_ds = datasets.ImageFolder(train_dir, transform=train_tfms)
-    val_ds   = datasets.ImageFolder(val_dir,   transform=eval_tfms)
-    test_ds  = datasets.ImageFolder(test_dir,  transform=eval_tfms) if os.path.isdir(test_dir) else None
-
-    print("Classes / idx:", train_ds.class_to_idx)
-
-    if balance:
-        # Weighted sampler nếu lệch lớp
-        targets = [y for _, y in train_ds.samples]
-        class_count = torch.bincount(torch.tensor(targets))
-        class_weights = 1.0 / class_count.float()
-        sample_weights = [class_weights[t] for t in targets]
-        sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
-        train_loader = DataLoader(train_ds, batch_size=batch_size, sampler=sampler,
-                                  num_workers=num_workers, pin_memory=True)
-    else:
-        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                                  num_workers=num_workers, pin_memory=True)
-
-    val_loader  = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
-                             num_workers=num_workers, pin_memory=True)
-    test_loader = (DataLoader(test_ds, batch_size=batch_size, shuffle=False,
-                              num_workers=num_workers, pin_memory=True)
-                   if test_ds is not None else None)
-    num_classes = len(train_ds.classes)
-    return train_loader, val_loader, test_loader, num_classes
-
-# ------------------------- Models -------------------------
-def build_model(model_name: str, num_classes: int):
-    name = model_name.lower()
-    if name in ["efficientnet_b3", "b3", "efficientnet"]:
-        from efficientnet import EfficientNetB3 as EffB3
-        model = EffB3(num_classes=num_classes)
-    elif name in ["xception", "xcep"]:
-        from xception import Xception
-        model = Xception(num_classes=num_classes)
-    else:
-        raise ValueError(f"Unknown model: {model_name}")
-    return model
-
-# ------------------------- Train / Eval -------------------------
-@torch.no_grad()
-def evaluate(model, loader, device, criterion):
-    model.eval()
-    total, correct, loss_sum = 0, 0, 0.0
-    for x, y in loader:
-        x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-        logits = model(x)
-        loss = criterion(logits, y)
-        loss_sum += loss.item() * x.size(0)
-        pred = logits.argmax(1)
-        correct += (pred == y).sum().item()
-        total += x.size(0)
-    return loss_sum/total, correct/total
-
-def train_one_epoch(model, loader, device, optimizer, criterion, scaler=None, max_norm=None):
-    model.train()
-    total, correct, loss_sum = 0, 0, 0.0
-    for x, y in loader:
-        x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-        optimizer.zero_grad(set_to_none=True)
-        if scaler is None:
-            logits = model(x)
-            loss = criterion(logits, y)
-            loss.backward()
-            if max_norm:
-                nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-            optimizer.step()
+        # Skip connection
+        if stride != 1 or in_ch != out_ch:
+            self.skip = nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_ch),
+            )
         else:
-            with torch.cuda.amp.autocast():
-                logits = model(x)
-                loss = criterion(logits, y)
-            scaler.scale(loss).backward()
-            if max_norm:
-                scaler.unscale_(optimizer)
-                nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-            scaler.step(optimizer)
-            scaler.update()
+            self.skip = nn.Identity()
 
-        loss_sum += loss.item() * x.size(0)
-        pred = logits.argmax(1)
-        correct += (pred == y).sum().item()
-        total += x.size(0)
+    def forward(self, x):
+        return self.body(x) + self.skip(x)
 
-    return loss_sum/total, correct/total
+# -------------------- Xception nguyên bản (ImageNet) --------------------
+class Xception(nn.Module):
+    """
+    Cấu trúc theo paper (phiên bản ImageNet):
+    Entry Flow:
+      - Conv 3x3 s2, 32; Conv 3x3, 64
+      - Block: (in=64,out=128,reps=2,stride=2)
+      - Block: (in=128,out=256,reps=2,stride=2)
+      - Block: (in=256,out=728,reps=2,stride=2)
+    Middle Flow:
+      - 8 blocks giống nhau: (in=728,out=728,reps=3,stride=1)
+    Exit Flow:
+      - Block: (in=728,out=1024,reps=2,stride=2)
+      - ReLU -> SepConv(1024->1536) -> ReLU -> SepConv(1536->2048)
+    Cuối: GlobalAvgPool -> FC(num_classes)
+    Input chuẩn: 299x299
+    """
+    def __init__(self, num_classes=1000):
+        super().__init__()
 
-# ------------------------- Main -------------------------
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--data-root", type=str, required=True, help="Path tới thư mục Dataset chứa train/val/(test)")
-    p.add_argument("--dataset-name", type=str, default=None, help="Tên dataset để gắn vào file .pth; mặc định = tên thư mục root")
-    p.add_argument("--model", type=str, required=True, choices=["efficientnet_b3","b3","xception"],
-                   help="Chọn model: efficientnet_b3 hoặc xception")
-    p.add_argument("--img-size", type=int, default=224)
-    p.add_argument("--batch-size", type=int, default=32)
-    p.add_argument("--epochs", type=int, default=10)
-    p.add_argument("--lr", type=float, default=1e-4)
-    p.add_argument("--wd", type=float, default=1e-4)
-    p.add_argument("--patience", type=int, default=10, help="Early stopping patience (0 để tắt)")
-    p.add_argument("--balance", action="store_true", help="Dùng WeightedRandomSampler nếu lệch lớp")
-    p.add_argument("--label-smoothing", type=float, default=0.0)
-    p.add_argument("--amp", action="store_true", help="Bật mixed precision")
-    p.add_argument("--workers", type=int, default=4)
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--save-dir", type=str, default="checkpoints")
-    args = p.parse_args()
+        # ----- Entry flow -----
+        self.entry_conv1 = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, stride=2, padding=0, bias=False),  # 299->149
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+        )
+        self.entry_conv2 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=0, bias=False),  # 149->147
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+        )
 
-    set_seed(args.seed)
-    device = get_device()
-    os.makedirs(args.save_dir, exist_ok=True)
+        # Ba block với stride=2 theo paper
+        self.block1 = XceptionBlock(64,   128, reps=2, stride=2, grow_first=True)   # 147->74
+        self.block2 = XceptionBlock(128,  256, reps=2, stride=2, grow_first=True)   # 74->37
+        self.block3 = XceptionBlock(256,  728, reps=2, stride=2, grow_first=True)   # 37->19
 
-    dataset_name = args.dataset_name or infer_dataset_name(args.data_root)
-    save_path = os.path.join(args.save_dir, f"{args.model}_{dataset_name}_best.pth")
+        # ----- Middle flow (8 lần) -----
+        middle_blocks = []
+        for _ in range(8):
+            middle_blocks.append(XceptionBlock(728, 728, reps=3, stride=1, grow_first=True))
+        self.middle = nn.Sequential(*middle_blocks)
 
-    # Data
-    train_loader, val_loader, test_loader, num_classes = make_loaders(
-        args.data_root, args.img_size, args.batch_size, args.workers, balance=args.balance
-    )
+        # ----- Exit flow -----
+        self.block_exit = XceptionBlock(728, 1024, reps=2, stride=2, grow_first=False)  # 19->10
 
-    # Model
-    model = build_model(args.model, num_classes=num_classes).to(device)
+        self.exit_conv = nn.Sequential(
+            nn.ReLU(inplace=True),
+            SeparableConv2d(1024, 1536, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            SeparableConv2d(1536, 2048, kernel_size=3, stride=1, padding=1),
+        )
 
-    # Loss / Optim / Sched
-    criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
-    scaler = torch.cuda.amp.GradScaler() if (args.amp and device == "cuda") else None
+        self.avgpool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Linear(2048, num_classes)
 
-    # Train loop
-    best_val_acc, best_state = 0.0, None
-    bad_epochs = 0
-    print(f"Start training on {device}. Saving best to: {save_path}")
-    for epoch in range(1, args.epochs+1):
-        t0 = time.time()
-        tr_loss, tr_acc = train_one_epoch(model, train_loader, device, optimizer, criterion, scaler)
-        val_loss, val_acc = evaluate(model, val_loader, device, criterion)
-        scheduler.step()
+        self._init_weights()
 
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            best_state = {k: v.cpu() for k, v in model.state_dict().items()}
-            torch.save(best_state, save_path)
-            bad_epochs = 0
-            flag = " (saved)"
-        else:
-            bad_epochs += 1
-            flag = ""
-        dt = time.time() - t0
-        print(f"Epoch {epoch:02d}/{args.epochs} | "
-              f"train {tr_loss:.4f}/{tr_acc:.4f} | "
-              f"val {val_loss:.4f}/{val_acc:.4f} | "
-              f"time {dt:.1f}s{flag}")
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, (nn.Conv2d,)):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, (nn.BatchNorm2d,)):
+                nn.init.ones_(m.weight); nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01); nn.init.zeros_(m.bias)
 
-        if args.patience > 0 and bad_epochs >= args.patience:
-            print("Early stopping.")
-            break
+    def forward(self, x):
+        x = self.entry_conv1(x)
+        x = self.entry_conv2(x)
 
-    # Load best & evaluate test
-    if os.path.isfile(save_path):
-        model.load_state_dict(torch.load(save_path, map_location=device))
-        print(f"Loaded best weights from: {save_path}")
+        x = self.block1(x)
+        x = self.block2(x)
+        x = self.block3(x)
 
-    if test_loader is not None:
-        test_loss, test_acc = evaluate(model, test_loader, device, criterion)
-        print(f"TEST  loss {test_loss:.4f}  acc {test_acc:.4f}")
+        x = self.middle(x)
 
+        x = self.block_exit(x)
+        x = self.exit_conv(x)
+
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.fc(x)
+        return x
+
+# -------------------- Quick test --------------------
 if __name__ == "__main__":
-    main()
+    model = Xception(num_classes=2)
+    x = torch.randn(1, 3, 299, 299)  # kích thước chuẩn của paper
+    y = model(x)
+    print("Output:", y.shape)
+    print("Params (M):", sum(p.numel() for p in model.parameters()) / 1e6)
