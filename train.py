@@ -16,9 +16,10 @@ BATCH_SIZE     = 32
 EPOCHS         = 10
 LR             = 1e-4
 WEIGHT_DECAY   = 1e-4
-NUM_WORKERS    = 4
+NUM_WORKERS    = 6                 # Tăng workers để load data nhanh hơn
 USE_AMP        = True              # mixed precision (CUDA)
 SEED           = 42
+PREFETCH_FACTOR = 2                # Prefetch batches để giảm GPU idle time
 DROP_CONNECT   = 0.2               # cho EfficientNetB3
 DROPOUT        = 0.3               # cho EfficientNetB3
 CHECKPOINT_DIR = "checkpoints"
@@ -32,6 +33,12 @@ set_seed(SEED)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+
+# GPU memory optimization
+if device.type == "cuda":
+    torch.cuda.empty_cache()
+    print(f"🚀 Using GPU: {torch.cuda.get_device_name(0)}")
+    print(f"   Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
 
 # ---------- 3) DATA ----------
 # Chuẩn ImageNet
@@ -57,7 +64,8 @@ def make_loader(split, tfm, shuffle):
     # Đảm bảo mapping nhãn ổn định (mong muốn: {'fake':0,'real':1})
     print(f"[{split}] classes ->", ds.classes, ds.class_to_idx)
     return ds, DataLoader(ds, batch_size=BATCH_SIZE, shuffle=shuffle,
-                          num_workers=NUM_WORKERS, pin_memory=True)
+                          num_workers=NUM_WORKERS, pin_memory=True,
+                          prefetch_factor=PREFETCH_FACTOR, persistent_workers=True)
 
 train_ds, train_loader = make_loader("train", train_tfms, True)
 val_ds,   val_loader   = make_loader("val",   eval_tfms,   False)
@@ -87,6 +95,13 @@ def build_model(key: str, num_classes: int):
 model, model_name = build_model(MODEL_KEY, NUM_CLASSES)
 model = model.to(device)
 
+# PyTorch 2.0+ compile để tăng tốc
+try:
+    model = torch.compile(model, mode='reduce-overhead')
+    print("✅ Model compiled with torch.compile")
+except Exception as e:
+    print(f"⚠️ torch.compile failed (PyTorch < 2.0?): {e}")
+
 if torch.cuda.device_count() > 1:
     print(f"Using {torch.cuda.device_count()} GPUs (DataParallel).")
     model = nn.DataParallel(model)
@@ -101,7 +116,9 @@ scaler = torch.cuda.amp.GradScaler(enabled=(USE_AMP and device.type == "cuda"))
 def run_epoch(loader, train_mode=True):
     model.train(train_mode)
     total, correct, loss_sum = 0, 0, 0.0
-    for x, y in loader:
+    progress_interval = max(1, len(loader) // 10)  # Show progress 10 times per epoch
+    
+    for batch_idx, (x, y) in enumerate(loader):
         x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
         with torch.set_grad_enabled(train_mode):
             if scaler.is_enabled():
@@ -126,13 +143,33 @@ def run_epoch(loader, train_mode=True):
         pred = logits.argmax(1)
         correct += (pred == y).sum().item()
         total += x.size(0)
+        
+        # Show progress during training
+        if train_mode and (batch_idx + 1) % progress_interval == 0:
+            current_acc = correct / total
+            print(f"  📈 Batch {batch_idx+1}/{len(loader)} | "
+                  f"Loss: {loss.item():.4f} | Acc: {current_acc:.4f}")
+    
     return loss_sum / total, correct / total
 
 # ---------- 6) TRAINING ----------
 best_val = -1.0
 ckpt_path = os.path.join(CHECKPOINT_DIR, f"{model_name}_{DATASET_ALIAS}_best.pth")
 
+# Warmup: chạy vài batch đầu để "nóng máy" GPU
+print("⚡ Warming up GPU...")
+model.train()
+warmup_batches = min(3, len(train_loader))
+for i, (x, y) in enumerate(train_loader):
+    if i >= warmup_batches:
+        break
+    x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+    with torch.cuda.amp.autocast():
+        _ = model(x)
+print(f"✅ Warmup completed ({warmup_batches} batches)")
+
 for ep in range(1, EPOCHS + 1):
+    print(f"\n🚀 Starting Epoch {ep}/{EPOCHS}...")
     t0 = time.time()
     tr_loss, tr_acc = run_epoch(train_loader, True)
     val_loss, val_acc = run_epoch(val_loader,  False)
