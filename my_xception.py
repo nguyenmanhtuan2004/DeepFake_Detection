@@ -4,16 +4,6 @@ import torch
 import torch.nn as nn
 
 class Xception(nn.Module):
-    """
-    Wrapper Xception dùng pretrained từ timm (ImageNet).
-    - num_classes: số lớp output (vd 2 cho fake/real)
-    - model_name: 'xception' (mặc định). Có thể dùng 'xception41','xception65','xception71','tf_xception'
-    - pretrained: tải trọng số ImageNet sẵn
-    - freeze_backbone: True -> chỉ train classifier vài epoch đầu (finetune nhanh & ổn định)
-    - drop_rate: dropout ở head
-    - drop_path_rate: stochastic depth
-    Gợi ý input: 299x299 cho 'tf_xception' / 299 or 224 cho 'xception' (timm vẫn chạy với mọi size nhờ GAP).
-    """
     def __init__(self,
                  num_classes: int = 2,
                  model_name: str = "xception",
@@ -27,9 +17,23 @@ class Xception(nn.Module):
         except ImportError as e:
             raise ImportError("Cần cài `timm`: pip install timm") from e
 
-        # Tạo backbone từ timm, thay classifier để ra đúng num_classes
-        # Một số model không hỗ trợ drop_path_rate, nên try-except
+        # Kiểm tra model có tồn tại không
+        available_models = timm.list_models()
+        if model_name not in available_models:
+            # Tìm model Xception thay thế
+            xception_models = [m for m in available_models if 'xception' in m.lower()]
+            if xception_models:
+                print(f"[Xception] Model '{model_name}' không tồn tại. Các model Xception có sẵn: {xception_models}")
+                model_name = xception_models[0]  # Dùng model đầu tiên
+                print(f"[Xception] Sử dụng '{model_name}' thay thế")
+            else:
+                raise ValueError(f"Không tìm thấy model Xception nào trong timm. Available models: {len(available_models)}")
+
+        # Khởi tạo backbone với debug và fallback
+        self.backbone = None
+        
         try:
+            print(f"[Xception] Đang tạo model '{model_name}' với pretrained={pretrained}")
             self.backbone = timm.create_model(
                 model_name,
                 pretrained=pretrained,
@@ -38,19 +42,50 @@ class Xception(nn.Module):
                 drop_path_rate=drop_path_rate,
                 global_pool="avg"
             )
+            print(f"[Xception] ✅ Tạo thành công!")
         except TypeError as e:
+            print(f"[Xception] ❌ Lỗi TypeError: {e}")
             # Fallback: không dùng drop_path_rate
             if "drop_path_rate" in str(e):
-                print(f"Warning: {model_name} không hỗ trợ drop_path_rate, bỏ qua parameter này")
-                self.backbone = timm.create_model(
-                    model_name,
-                    pretrained=pretrained,
-                    num_classes=num_classes,
-                    drop_rate=drop_rate,
-                    global_pool="avg"
-                )
+                print(f"[Xception] 🔄 Thử bỏ drop_path_rate...")
+                try:
+                    self.backbone = timm.create_model(
+                        model_name,
+                        pretrained=pretrained,
+                        num_classes=num_classes,
+                        drop_rate=drop_rate,
+                        global_pool="avg"
+                    )
+                    print(f"[Xception] ✅ Fallback thành công!")
+                except Exception as ex2:
+                    print(f"[Xception] ❌ Fallback thất bại: {ex2}")
+                    raise RuntimeError(f"Không thể tạo Xception với '{model_name}'. "
+                                     f"Lỗi gốc: {e}. Lỗi fallback: {ex2}") from ex2
             else:
-                raise
+                raise RuntimeError(f"Không thể tạo Xception với '{model_name}': {e}") from e
+        except Exception as ex:
+            print(f"[Xception] ❌ Lỗi khác: {ex}")
+            if pretrained:
+                print("[Xception] 🔄 Thử fallback với pretrained=False...")
+                try:
+                    self.backbone = timm.create_model(
+                        model_name,
+                        pretrained=False,
+                        num_classes=num_classes,
+                        drop_rate=drop_rate,
+                        global_pool="avg"
+                    )
+                    print(f"[Xception] ✅ Fallback thành công!")
+                except Exception as ex2:
+                    print(f"[Xception] ❌ Fallback cũng thất bại: {ex2}")
+                    raise RuntimeError(f"Không thể tạo Xception với '{model_name}'. "
+                                     f"Lỗi gốc: {ex}. Lỗi fallback: {ex2}") from ex2
+            else:
+                raise RuntimeError(f"Không thể tạo Xception với '{model_name}': {ex}") from ex
+        
+        # Đảm bảo backbone đã được tạo
+        if self.backbone is None:
+            raise RuntimeError("Xception backbone vẫn là None sau khi khởi tạo!")
 
         if freeze_backbone:
             # Đóng băng mọi thứ trừ classifier (tên head tuỳ model, timm map về "classifier")
@@ -61,6 +96,23 @@ class Xception(nn.Module):
 
         self._frozen = freeze_backbone
         self.model_name = model_name
+        
+        # Validation để đảm bảo model sẵn sàng
+        self._validate_model()
+
+    def _validate_model(self):
+        """Validate model is properly initialized"""
+        if not hasattr(self, 'backbone') or self.backbone is None:
+            raise RuntimeError("Xception backbone validation failed!")
+        
+        # Test forward pass với dummy input
+        try:
+            with torch.no_grad():
+                dummy_input = torch.randn(1, 3, 224, 224)
+                _ = self.backbone(dummy_input)
+            print("[Xception] ✅ Model validation passed")
+        except Exception as e:
+            raise RuntimeError(f"Xception validation failed: {e}") from e
 
     def unfreeze(self):
         """Gọi sau vài epoch để finetune toàn bộ backbone."""
@@ -69,7 +121,19 @@ class Xception(nn.Module):
         self._frozen = False
 
     def forward(self, x):
-        return self.backbone(x)
+        # DataParallel-safe forward: trực tiếp gọi backbone thay vì check hasattr
+        # hasattr có thể fail khi model được replicate sang GPU khác
+        try:
+            return self.backbone(x)
+        except AttributeError:
+            raise RuntimeError(
+                "Xception.backbone không tồn tại. Có thể do:\n"
+                "1. Lỗi trong __init__ (backbone chưa được tạo)\n"
+                "2. DataParallel replication issues\n"
+                "3. Model được load không đúng cách"
+            )
+        except Exception as e:
+            raise RuntimeError(f"Lỗi khi chạy forward pass trong Xception backbone: {e}") from e
 
 
 # Factory để tương thích với trainer gọi create_model(...)

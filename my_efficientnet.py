@@ -90,6 +90,9 @@ class EfficientNetB3(nn.Module):
 
         # (tuỳ chọn) thuộc tính tiện lợi
         self.num_features = self._get_num_features_safely()
+        
+        # Validation để đảm bảo model sẵn sàng
+        self._validate_model()
 
     # ----------------- helpers -----------------
     def _get_num_features_safely(self) -> int:
@@ -136,6 +139,20 @@ class EfficientNetB3(nn.Module):
             else:
                 p.requires_grad = False
 
+    def _validate_model(self):
+        """Validate model is properly initialized"""
+        if not hasattr(self, 'backbone') or self.backbone is None:
+            raise RuntimeError("EfficientNetB3 backbone validation failed!")
+        
+        # Test forward pass với dummy input
+        try:
+            with torch.no_grad():
+                dummy_input = torch.randn(1, 3, 224, 224)
+                _ = self.backbone(dummy_input)
+            print("[EfficientNetB3] ✅ Model validation passed")
+        except Exception as e:
+            raise RuntimeError(f"EfficientNetB3 validation failed: {e}") from e
+
     def unfreeze(self):
         for p in self.backbone.parameters():
             p.requires_grad = True
@@ -143,16 +160,19 @@ class EfficientNetB3(nn.Module):
 
     # ----------------- nn.Module -----------------
     def forward(self, x):
-        # bảo vệ: nếu vì lý do gì backbone chưa có, báo lỗi rõ ràng
-        if not hasattr(self, "backbone"):
-            raise RuntimeError("EfficientNetB3 không có thuộc tính 'backbone'. Lỗi trong __init__!")
-        if self.backbone is None:
-            raise RuntimeError("EfficientNetB3.backbone là None. Lỗi khởi tạo backbone!")
-        
+        # DataParallel-safe forward: trực tiếp gọi backbone thay vì check hasattr
+        # hasattr có thể fail khi model được replicate sang GPU khác
         try:
             return self.backbone(x)
+        except AttributeError:
+            raise RuntimeError(
+                "EfficientNetB3.backbone không tồn tại. Có thể do:\n"
+                "1. Lỗi trong __init__ (backbone chưa được tạo)\n"
+                "2. DataParallel replication issues\n"
+                "3. Model được load không đúng cách"
+            )
         except Exception as e:
-            raise RuntimeError(f"Lỗi khi chạy forward pass trong backbone: {e}") from e
+            raise RuntimeError(f"Lỗi khi chạy forward pass trong EfficientNet backbone: {e}") from e
 
 
 # --------- Factories (giữ tương thích) ----------
