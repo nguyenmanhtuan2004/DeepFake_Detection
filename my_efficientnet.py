@@ -45,7 +45,7 @@ class EfficientNetB3(nn.Module):
                     "Đang fallback sang pretrained=False."
                 )
                 self.backbone = timm.create_model(
-                    "tf_efficientnet_b3_ns",
+                    "tf_efficientnet_b3",
                     pretrained=False,
                     num_classes=num_classes,
                     drop_rate=dropout,
