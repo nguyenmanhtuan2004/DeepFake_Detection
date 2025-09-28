@@ -1,51 +1,75 @@
 # efficientnet.py
+import warnings
 import torch
 import torch.nn as nn
 
+_HEAD_KEYS = ("classifier", "fc", "head", "last_linear")
+
 class EfficientNetB3(nn.Module):
     """
-    Wrapper EfficientNet-B3 dùng pretrained từ timm (tf_efficientnet_b3_ns)
-    - num_classes: số lớp output (2 cho fake/real)
-    - drop_connect_rate: drop path (stochastic depth)
+    EfficientNet-B3 pretrained (timm, tf_efficientnet_b3_ns).
+    - num_classes: số lớp output
+    - drop_connect_rate: stochastic depth
     - dropout: dropout ở head
-    - pretrained: có tải trọng số ImageNet sẵn không
-    - freeze_backbone: nếu True sẽ freeze toàn bộ backbone (trừ classifier)
-                       -> phù hợp phase 1: train nhanh phần head vài epoch
+    - pretrained: dùng trọng số ImageNet (tải từ cache/online)
+    - freeze_backbone: freeze mọi thứ trừ head trong vài epoch đầu
     """
-    def __init__(self,
-                 num_classes: int = 2,
-                 drop_connect_rate: float = 0.2,
-                 dropout: float = 0.3,
-                 pretrained: bool = True,
-                 freeze_backbone: bool = False):
+    def __init__(
+        self,
+        num_classes: int = 2,
+        drop_connect_rate: float = 0.2,
+        dropout: float = 0.3,
+        pretrained: bool = True,
+        freeze_backbone: bool = False,
+    ):
         super().__init__()
         try:
             import timm
         except ImportError as e:
-            raise ImportError(
-                "Cần cài `timm` để dùng EfficientNet pretrained. Cài: pip install timm"
-            ) from e
+            raise ImportError("Cần cài timm: pip install timm") from e
 
-        # 'tf_efficientnet_b3_ns' = bản B3 tốt, pretrained ImageNet (Noisy Student)
-        self.backbone = timm.create_model(
-            "tf_efficientnet_b3_ns",
-            pretrained=pretrained,
-            num_classes=num_classes,           # tự tạo classifier đúng num_classes
-            drop_rate=dropout,                 # dropout ở head
-            drop_path_rate=drop_connect_rate   # stochastic depth toàn mạng
-        )
+        # Tạo model; nếu pretrained không tải được (không có internet/cache), fallback sang random init
+        try:
+            self.backbone = timm.create_model(
+                "tf_efficientnet_b3_ns",
+                pretrained=pretrained,
+                num_classes=num_classes,
+                drop_rate=dropout,
+                drop_path_rate=drop_connect_rate,
+                global_pool="avg",
+            )
+        except Exception as ex:
+            if pretrained:
+                warnings.warn(
+                    f"[EfficientNetB3] Không tải được pretrained weights ({ex}). "
+                    "Đang fallback sang pretrained=False."
+                )
+                self.backbone = timm.create_model(
+                    "tf_efficientnet_b3_ns",
+                    pretrained=False,
+                    num_classes=num_classes,
+                    drop_rate=dropout,
+                    drop_path_rate=drop_connect_rate,
+                    global_pool="avg",
+                )
+            else:
+                raise
 
         if freeze_backbone:
-            # Freeze tất cả trừ classifier
-            for name, p in self.backbone.named_parameters():
-                if "classifier" in name:
-                    continue
-                p.requires_grad = False
+            self._freeze_all_but_head()
 
         self._frozen = freeze_backbone
 
+    # ---- tiện ích freeze/unfreeze ----
+    def _is_head_param(self, name: str) -> bool:
+        return any(k in name for k in _HEAD_KEYS)
+
+    def _freeze_all_but_head(self):
+        for n, p in self.backbone.named_parameters():
+            if not self._is_head_param(n):
+                p.requires_grad = False
+
     def unfreeze(self):
-        """Gọi hàm này sau vài epoch để fine-tune toàn bộ backbone."""
         for p in self.backbone.parameters():
             p.requires_grad = True
         self._frozen = False
@@ -53,27 +77,27 @@ class EfficientNetB3(nn.Module):
     def forward(self, x):
         return self.backbone(x)
 
-# Factory để hợp với trainer hiện tại
-def EfficientNetB3_pretrained(num_classes=2,
-                              drop_connect_rate=0.2,
-                              dropout=0.3,
-                              freeze_backbone=False):
-    return EfficientNetB3(num_classes=num_classes,
-                          drop_connect_rate=drop_connect_rate,
-                          dropout=dropout,
-                          pretrained=True,
-                          freeze_backbone=freeze_backbone)
 
-# Giữ tên create_model cho tương thích nếu trainer gọi
+# Factory giữ tương thích với trainer cũ
+def EfficientNetB3_pretrained(num_classes=2, drop_connect_rate=0.2, dropout=0.3, freeze_backbone=False):
+    return EfficientNetB3(
+        num_classes=num_classes,
+        drop_connect_rate=drop_connect_rate,
+        dropout=dropout,
+        pretrained=True,
+        freeze_backbone=freeze_backbone,
+    )
+
 def create_model(num_classes=2, drop_connect_rate=0.2, dropout=0.3, freeze_backbone=False):
     return EfficientNetB3_pretrained(num_classes, drop_connect_rate, dropout, freeze_backbone)
 
+
 if __name__ == "__main__":
-    # Quick test
-    model = EfficientNetB3(num_classes=2, drop_connect_rate=0.2, dropout=0.3, pretrained=True, freeze_backbone=True)
+    # Quick test: dùng pretrained=False để không cần internet
+    m = EfficientNetB3(num_classes=2, drop_connect_rate=0.2, dropout=0.3, pretrained=False, freeze_backbone=True)
     x = torch.randn(1, 3, 224, 224)
-    y = model(x)
+    y = m(x)
     print("Output:", y.shape)
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total     = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in m.parameters() if p.requires_grad)
+    total     = sum(p.numel() for p in m.parameters())
     print(f"Trainable params: {trainable/1e6:.2f}M / Total: {total/1e6:.2f}M")

@@ -9,7 +9,7 @@ from torchvision import datasets, transforms
 
 # ---------- 1) PARAMS (đổi trực tiếp ở đây) ----------
 DATASET_ROOT   = "Dataset"         # có train/val/test mỗi cái gồm fake/real
-DATASET_ALIAS  = DATASET_ROOT       # dùng để đặt tên file lưu (đổi tùy ý)
+DATASET_ALIAS  = Path(DATASET_ROOT).name      # dùng để đặt tên file lưu (đổi tùy ý)
 MODEL_KEY      = "efficientnet_b3" # {"efficientnet_b3", "xception"}
 INPUT_SIZE     = 224               # 224 cho cả 2 model (ok); Xception gốc 299 vẫn chạy 224
 BATCH_SIZE     = 32
