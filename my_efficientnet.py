@@ -3,15 +3,40 @@ import warnings
 import torch
 import torch.nn as nn
 
-_HEAD_KEYS = ("classifier", "fc", "head", "last_linear")
+__all__ = ["EfficientNetB3", "create_model", "EfficientNetB3_pretrained"]
+
+# Các tên model "an toàn" trên nhiều version timm (không bắt buộc tf_*_ns)
+_SAFE_CANDIDATES = ("efficientnet_b3", "tf_efficientnet_b3")
+
+def _pick_model_name(timm, preferred: str | None):
+    avail = set(timm.list_models())
+    if preferred and preferred in avail:
+        return preferred
+    for name in _SAFE_CANDIDATES:
+        if name in avail:
+            return name
+    raise ValueError(
+        f"Không tìm thấy EfficientNet-B3 phù hợp trong timm. "
+        f"Đã thử: { (preferred,) if preferred else () } + {_SAFE_CANDIDATES}"
+    )
+
+def _get_classifier_module(m: nn.Module) -> nn.Module | None:
+    if hasattr(m, "get_classifier"):
+        try:
+            c = m.get_classifier()
+            if isinstance(c, nn.Module): return c
+        except Exception:
+            pass
+    if hasattr(m, "classifier") and isinstance(m.classifier, nn.Module):
+        return m.classifier
+    return None
 
 class EfficientNetB3(nn.Module):
     """
-    EfficientNet-B3 pretrained qua timm.
-    - Tự chọn mô hình khả dụng theo thứ tự ưu tiên:
-        'tf_efficientnet_b3_ns' -> 'tf_efficientnet_b3' -> 'efficientnet_b3'
-    - Fallback an toàn nếu không tải được pretrained weights (offline / không có trên version timm).
-    - freeze_backbone: đóng băng mọi thứ trừ head (classifier) trong vài epoch đầu.
+    EfficientNet-B3 (timm) — thân thiện Kaggle/1 GPU.
+    - Không yêu cầu 'tf_efficientnet_b3_ns'; ưu tiên 'efficientnet_b3'.
+    - Fallback pretrained=False nếu không tải được weights.
+    - freeze_backbone: chỉ train head vài epoch đầu.
     """
     def __init__(
         self,
@@ -20,162 +45,79 @@ class EfficientNetB3(nn.Module):
         dropout: float = 0.3,
         pretrained: bool = True,
         freeze_backbone: bool = False,
-        model_candidates = ("tf_efficientnet_b3", "efficientnet_b3"),
+        model_name: str | None = None,   # ép tên cụ thể nếu muốn
     ):
         super().__init__()
+        # Đăng ký trước để mọi replica (nếu có) đều có thuộc tính
+        self.backbone = nn.Identity()
+        self.model_name = model_name or ""
+
         try:
             import timm
         except ImportError as e:
             raise ImportError("Cần cài timm: pip install timm") from e
 
-        # 1) Chọn tên model timm khả dụng
-        chosen = None
-        available = set(timm.list_models())
-        for name in model_candidates:
-            if name in available:
-                chosen = name
-                break
-        if chosen is None:
-            raise ValueError(
-                f"Không tìm thấy EfficientNet-B3 trong timm. "
-                f"Đã thử: {model_candidates}. Version timm của bạn: {getattr(timm, '__version__', 'unknown')}"
-            )
+        # Chọn tên model an toàn theo version timm
+        name = _pick_model_name(timm, preferred=model_name)
+        self.model_name = name
 
-        self.model_name = chosen
-
-        # 2) Tạo backbone, fallback an toàn nếu không tải được weights
-        self.backbone = None  # Khởi tạo mặc định
-        
+        # Tạo model: thử pretrained trước, fail thì về pretrained=False (offline/cache trống)
         try:
-            print(f"[EfficientNetB3] Đang tạo model '{self.model_name}' với pretrained={pretrained}")
-            self.backbone = timm.create_model(
-                self.model_name,
+            net = timm.create_model(
+                name,
                 pretrained=pretrained,
                 num_classes=num_classes,
                 drop_rate=dropout,
                 drop_path_rate=drop_connect_rate,
                 global_pool="avg",
             )
-            print(f"[EfficientNetB3] ✅ Tạo thành công!")
         except Exception as ex:
-            print(f"[EfficientNetB3] ❌ Lỗi tạo model: {ex}")
             if pretrained:
-                print("[EfficientNetB3] 🔄 Thử fallback với pretrained=False...")
-                try:
-                    self.backbone = timm.create_model(
-                        self.model_name,
-                        pretrained=False,
-                        num_classes=num_classes,
-                        drop_rate=dropout,
-                        drop_path_rate=drop_connect_rate,
-                        global_pool="avg",
-                    )
-                    print(f"[EfficientNetB3] ✅ Fallback thành công!")
-                    warnings.warn(f"Không tải được pretrained weights, sử dụng random weights.")
-                except Exception as ex2:
-                    print(f"[EfficientNetB3] ❌ Fallback cũng thất bại: {ex2}")
-                    raise RuntimeError(f"Không thể tạo EfficientNetB3 với '{self.model_name}'. "
-                                     f"Lỗi gốc: {ex}. Lỗi fallback: {ex2}") from ex2
+                warnings.warn(
+                    f"[EffB3] Không tải được pretrained cho '{name}': {ex}. "
+                    "Fallback sang pretrained=False."
+                )
+                net = timm.create_model(
+                    name,
+                    pretrained=False,
+                    num_classes=num_classes,
+                    drop_rate=dropout,
+                    drop_path_rate=drop_connect_rate,
+                    global_pool="avg",
+                )
             else:
-                raise RuntimeError(f"Không thể tạo EfficientNetB3 với '{self.model_name}': {ex}") from ex
-        
-        # Đảm bảo backbone đã được tạo
-        if self.backbone is None:
-            raise RuntimeError("EfficientNetB3 backbone vẫn là None sau khi khởi tạo!")
+                raise
+
+        self.backbone = net
 
         if freeze_backbone:
-            self._freeze_all_but_head()
+            self.freeze_backbone()
 
-        self._frozen = freeze_backbone
-
-        # (tuỳ chọn) thuộc tính tiện lợi
-        self.num_features = self._get_num_features_safely()
-        
-        # Validation để đảm bảo model sẵn sàng
-        self._validate_model()
-
-    # ----------------- helpers -----------------
-    def _get_num_features_safely(self) -> int:
-        # timm model nào cũng có get_num_features()
+        # Thông tin tiện lợi
         try:
-            return int(self.backbone.get_num_features())
+            self.num_features = int(self.backbone.get_num_features())
         except Exception:
-            # dự phòng: suy ra từ classifier in_features
-            clf = self._get_classifier_module()
-            if isinstance(clf, nn.Linear):
-                return clf.in_features
-            return -1
+            clf = _get_classifier_module(self.backbone)
+            self.num_features = getattr(clf, "in_features", -1)
 
-    def _get_classifier_module(self):
-        # ưu tiên API timm
-        if hasattr(self.backbone, "get_classifier"):
-            try:
-                clf = self.backbone.get_classifier()
-                if isinstance(clf, nn.Module):
-                    return clf
-            except Exception:
-                pass
-        # fallback theo tên quen thuộc
-        for k in _HEAD_KEYS:
-            if hasattr(self.backbone, k) and isinstance(getattr(self.backbone, k), nn.Module):
-                return getattr(self.backbone, k)
-        return None
-
-    def _is_head_param(self, name: str) -> bool:
-        if any(k in name for k in _HEAD_KEYS):
-            return True
-        # tên head ở một số bản timm có thể là 'classifier'
-        return False
-
-    def _freeze_all_but_head(self):
-        head = self._get_classifier_module()
-        head_ids = set()
-        if head is not None:
-            head_ids = {id(p) for p in head.parameters()}
+    # ---------- freeze / unfreeze ----------
+    def freeze_backbone(self):
+        head = _get_classifier_module(self.backbone)
+        head_ids = set(id(p) for p in head.parameters()) if head is not None else set()
         for n, p in self.backbone.named_parameters():
-            # giữ head trainable
-            if id(p) in head_ids or self._is_head_param(n):
-                p.requires_grad = True
-            else:
-                p.requires_grad = False
-
-    def _validate_model(self):
-        """Validate model is properly initialized"""
-        if not hasattr(self, 'backbone') or self.backbone is None:
-            raise RuntimeError("EfficientNetB3 backbone validation failed!")
-        
-        # Test forward pass với dummy input
-        try:
-            with torch.no_grad():
-                dummy_input = torch.randn(1, 3, 224, 224)
-                _ = self.backbone(dummy_input)
-            print("[EfficientNetB3] ✅ Model validation passed")
-        except Exception as e:
-            raise RuntimeError(f"EfficientNetB3 validation failed: {e}") from e
+            p.requires_grad = (id(p) in head_ids) or ("classifier" in n)
 
     def unfreeze(self):
         for p in self.backbone.parameters():
             p.requires_grad = True
-        self._frozen = False
 
-    # ----------------- nn.Module -----------------
+    # ---------- forward ----------
     def forward(self, x):
-        # DataParallel-safe forward: trực tiếp gọi backbone thay vì check hasattr
-        # hasattr có thể fail khi model được replicate sang GPU khác
-        try:
-            return self.backbone(x)
-        except AttributeError:
-            raise RuntimeError(
-                "EfficientNetB3.backbone không tồn tại. Có thể do:\n"
-                "1. Lỗi trong __init__ (backbone chưa được tạo)\n"
-                "2. DataParallel replication issues\n"
-                "3. Model được load không đúng cách"
-            )
-        except Exception as e:
-            raise RuntimeError(f"Lỗi khi chạy forward pass trong EfficientNet backbone: {e}") from e
+        if isinstance(self.backbone, nn.Identity):
+            raise RuntimeError("Backbone chưa được gán. Kiểm tra import/khởi tạo model.")
+        return self.backbone(x)
 
-
-# --------- Factories (giữ tương thích) ----------
+# Factories giữ tương thích với trainer cũ
 def EfficientNetB3_pretrained(num_classes=2, drop_connect_rate=0.2, dropout=0.3, freeze_backbone=False):
     return EfficientNetB3(
         num_classes=num_classes,
@@ -183,18 +125,18 @@ def EfficientNetB3_pretrained(num_classes=2, drop_connect_rate=0.2, dropout=0.3,
         dropout=dropout,
         pretrained=True,
         freeze_backbone=freeze_backbone,
+        model_name=None,  # để auto-pick từ _SAFE_CANDIDATES
     )
 
 def create_model(num_classes=2, drop_connect_rate=0.2, dropout=0.3, freeze_backbone=False):
     return EfficientNetB3_pretrained(num_classes, drop_connect_rate, dropout, freeze_backbone)
 
-
 if __name__ == "__main__":
-    # Test nhanh (không cần internet)
-    m = EfficientNetB3(num_classes=2, drop_connect_rate=0.2, dropout=0.3, pretrained=False, freeze_backbone=True)
+    # Test nhanh (không cần Internet)
+    m = EfficientNetB3(num_classes=2, pretrained=False, freeze_backbone=True)
     x = torch.randn(1, 3, 224, 224)
     y = m(x)
     print("Model:", m.model_name, "| Output:", y.shape)
-    trainable = sum(p.numel() for p in m.parameters() if p.requires_grad)
-    total     = sum(p.numel() for p in m.parameters())
-    print(f"Trainable params: {trainable/1e6:.2f}M / Total: {total/1e6:.2f}M")
+    tr = sum(p.numel() for p in m.parameters() if p.requires_grad)
+    tt = sum(p.numel() for p in m.parameters())
+    print(f"Trainable: {tr/1e6:.2f}M / Total: {tt/1e6:.2f}M")
