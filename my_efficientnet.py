@@ -31,7 +31,7 @@ class EfficientNetB3(nn.Module):
         # Tạo model; nếu pretrained không tải được (không có internet/cache), fallback sang random init
         try:
             self.backbone = timm.create_model(
-                "tf_efficientnet_b3_ns",
+                "efficientnet_b3",
                 pretrained=pretrained,
                 num_classes=num_classes,
                 drop_rate=dropout,
