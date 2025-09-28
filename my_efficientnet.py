@@ -20,7 +20,7 @@ class EfficientNetB3(nn.Module):
         dropout: float = 0.3,
         pretrained: bool = True,
         freeze_backbone: bool = False,
-        model_candidates = ("tf_efficientnet_b3_ns", "tf_efficientnet_b3", "efficientnet_b3"),
+        model_candidates = ("tf_efficientnet_b3", "efficientnet_b3"),
     ):
         super().__init__()
         try:
@@ -44,7 +44,10 @@ class EfficientNetB3(nn.Module):
         self.model_name = chosen
 
         # 2) Tạo backbone, fallback an toàn nếu không tải được weights
+        self.backbone = None  # Khởi tạo mặc định
+        
         try:
+            print(f"[EfficientNetB3] Đang tạo model '{self.model_name}' với pretrained={pretrained}")
             self.backbone = timm.create_model(
                 self.model_name,
                 pretrained=pretrained,
@@ -53,22 +56,32 @@ class EfficientNetB3(nn.Module):
                 drop_path_rate=drop_connect_rate,
                 global_pool="avg",
             )
+            print(f"[EfficientNetB3] ✅ Tạo thành công!")
         except Exception as ex:
+            print(f"[EfficientNetB3] ❌ Lỗi tạo model: {ex}")
             if pretrained:
-                warnings.warn(
-                    f"[EfficientNetB3] Không tải được pretrained weights cho '{self.model_name}' ({ex}). "
-                    "Fallback sang pretrained=False."
-                )
-                self.backbone = timm.create_model(
-                    self.model_name,
-                    pretrained=False,
-                    num_classes=num_classes,
-                    drop_rate=dropout,
-                    drop_path_rate=drop_connect_rate,
-                    global_pool="avg",
-                )
+                print("[EfficientNetB3] 🔄 Thử fallback với pretrained=False...")
+                try:
+                    self.backbone = timm.create_model(
+                        self.model_name,
+                        pretrained=False,
+                        num_classes=num_classes,
+                        drop_rate=dropout,
+                        drop_path_rate=drop_connect_rate,
+                        global_pool="avg",
+                    )
+                    print(f"[EfficientNetB3] ✅ Fallback thành công!")
+                    warnings.warn(f"Không tải được pretrained weights, sử dụng random weights.")
+                except Exception as ex2:
+                    print(f"[EfficientNetB3] ❌ Fallback cũng thất bại: {ex2}")
+                    raise RuntimeError(f"Không thể tạo EfficientNetB3 với '{self.model_name}'. "
+                                     f"Lỗi gốc: {ex}. Lỗi fallback: {ex2}") from ex2
             else:
-                raise
+                raise RuntimeError(f"Không thể tạo EfficientNetB3 với '{self.model_name}': {ex}") from ex
+        
+        # Đảm bảo backbone đã được tạo
+        if self.backbone is None:
+            raise RuntimeError("EfficientNetB3 backbone vẫn là None sau khi khởi tạo!")
 
         if freeze_backbone:
             self._freeze_all_but_head()
@@ -131,9 +144,15 @@ class EfficientNetB3(nn.Module):
     # ----------------- nn.Module -----------------
     def forward(self, x):
         # bảo vệ: nếu vì lý do gì backbone chưa có, báo lỗi rõ ràng
-        if not hasattr(self, "backbone") or self.backbone is None:
-            raise RuntimeError("EfficientNetB3 chưa khởi tạo backbone. Kiểm tra lỗi import/khởi tạo.")
-        return self.backbone(x)
+        if not hasattr(self, "backbone"):
+            raise RuntimeError("EfficientNetB3 không có thuộc tính 'backbone'. Lỗi trong __init__!")
+        if self.backbone is None:
+            raise RuntimeError("EfficientNetB3.backbone là None. Lỗi khởi tạo backbone!")
+        
+        try:
+            return self.backbone(x)
+        except Exception as e:
+            raise RuntimeError(f"Lỗi khi chạy forward pass trong backbone: {e}") from e
 
 
 # --------- Factories (giữ tương thích) ----------
