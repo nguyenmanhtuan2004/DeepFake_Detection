@@ -28,14 +28,29 @@ class Xception(nn.Module):
             raise ImportError("Cần cài `timm`: pip install timm") from e
 
         # Tạo backbone từ timm, thay classifier để ra đúng num_classes
-        self.backbone = timm.create_model(
-            model_name,
-            pretrained=pretrained,
-            num_classes=num_classes,     # timm sẽ thay classifier phù hợp
-            drop_rate=drop_rate,
-            drop_path_rate=drop_path_rate,
-            global_pool="avg"            # GAP
-        )
+        # Một số model không hỗ trợ drop_path_rate, nên try-except
+        try:
+            self.backbone = timm.create_model(
+                model_name,
+                pretrained=pretrained,
+                num_classes=num_classes,
+                drop_rate=drop_rate,
+                drop_path_rate=drop_path_rate,
+                global_pool="avg"
+            )
+        except TypeError as e:
+            # Fallback: không dùng drop_path_rate
+            if "drop_path_rate" in str(e):
+                print(f"Warning: {model_name} không hỗ trợ drop_path_rate, bỏ qua parameter này")
+                self.backbone = timm.create_model(
+                    model_name,
+                    pretrained=pretrained,
+                    num_classes=num_classes,
+                    drop_rate=drop_rate,
+                    global_pool="avg"
+                )
+            else:
+                raise
 
         if freeze_backbone:
             # Đóng băng mọi thứ trừ classifier (tên head tuỳ model, timm map về "classifier")
