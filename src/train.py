@@ -1,115 +1,127 @@
-import os, numpy as np
-from pathlib import Path
-from config import load_config
-from utils import set_seed, get_device, ensure_dir
-from data import make_loaders
-from backbones import build_backbone
-from extract_features import extract_stacked_features
-from feature_selection import feature_selection_topk
-from meta_mlp import train_meta, evaluate_meta
-if __name__ == "__main__":
-    cfg = load_config("config.yaml")
-    set_seed(cfg.project.seed)
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from data_loader import create_dataloaders
+from feature_extractor import extract_and_stack_features, save_features, load_features
+from feature_selector import select_features_ensemble
+from models import MetaLearnerMLP
+import os
 
-
-    out_dir = Path(cfg.project.out_dir)
-    ensure_dir(out_dir)
-
-
-    device = get_device(cfg.device.prefer_gpu)
-    print(f"[Device] {device}")
-    # --- DATALOADERS ---
-    tr_ds, tr_dl, va_ds, va_dl, te_ds, te_dl = make_loaders(
-    root=cfg.data.dataset_root,
-    input_size=cfg.data.input_size,
-    batch_size=cfg.data.batch_size_img,
-    num_workers=min(cfg.data.num_workers, os.cpu_count() or 4),
-    mean=cfg.data.normalize.mean,
-    std=cfg.data.normalize.std,
-    use_amp=cfg.device.use_amp,
-    )
-    num_classes = len(tr_ds.classes)
-    print(f"[Data] Classes: {tr_ds.classes} ({num_classes})")
-    # --- BACKBONES ---
-    backs = []
-    dims = []
-    for bcfg in cfg.backbones:
-        m, d = build_backbone(
-        bcfg.name,
-        pretrained=bcfg.pretrained,
-        global_pool=bcfg.global_pool,
-        device=device,
-        input_size=cfg.data.input_size,
+class Trainer:
+    def __init__(self, data_dir, batch_size=32, device='cuda', k_features=1000):
+        self.data_dir = data_dir
+        self.batch_size = batch_size
+        self.device = device
+        self.k_features = k_features
+        self.feature_dir = 'features'
+        os.makedirs(self.feature_dir, exist_ok=True)
+        
+    def extract_or_load_features(self):
+        train_path = f'{self.feature_dir}/train_features.npz'
+        val_path = f'{self.feature_dir}/val_features.npz'
+        test_path = f'{self.feature_dir}/test_features.npz'
+        
+        if os.path.exists(train_path) and os.path.exists(val_path) and os.path.exists(test_path):
+            print("Loading saved features...")
+            X_train, y_train = load_features(train_path)
+            X_val, y_val = load_features(val_path)
+            X_test, y_test = load_features(test_path)
+        else:
+            print("Extracting features from images...")
+            train_loader, val_loader, test_loader = create_dataloaders(
+                self.data_dir, self.batch_size, img_size=300, num_workers=4
+            )
+            
+            X_train, y_train = extract_and_stack_features(train_loader, self.device)
+            X_val, y_val = extract_and_stack_features(val_loader, self.device)
+            X_test, y_test = extract_and_stack_features(test_loader, self.device)
+            
+            save_features(X_train, y_train, train_path)
+            save_features(X_val, y_val, val_path)
+            save_features(X_test, y_test, test_path)
+        
+        return X_train, y_train, X_val, y_val, X_test, y_test
+    
+    def train_meta_learner(self, X_train, y_train, X_val, y_val, epochs=50, lr=0.001):
+        input_dim = X_train.shape[1]
+        model = MetaLearnerMLP(input_dim=input_dim).to(self.device)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = optim.Adam(model.parameters(), lr=lr)
+        
+        X_train_tensor = torch.FloatTensor(X_train).to(self.device)
+        y_train_tensor = torch.LongTensor(y_train).to(self.device)
+        X_val_tensor = torch.FloatTensor(X_val).to(self.device)
+        y_val_tensor = torch.LongTensor(y_val).to(self.device)
+        
+        best_val_acc = 0
+        
+        for epoch in range(epochs):
+            model.train()
+            optimizer.zero_grad()
+            outputs = model(X_train_tensor)
+            loss = criterion(outputs, y_train_tensor)
+            loss.backward()
+            optimizer.step()
+            
+            model.eval()
+            with torch.no_grad():
+                val_outputs = model(X_val_tensor)
+                val_loss = criterion(val_outputs, y_val_tensor)
+                val_preds = val_outputs.argmax(dim=1).cpu().numpy()
+                val_acc = accuracy_score(y_val, val_preds)
+                
+                if val_acc > best_val_acc:
+                    best_val_acc = val_acc
+                    torch.save(model.state_dict(), 'best_meta_learner.pth')
+                
+                if (epoch + 1) % 10 == 0:
+                    print(f'Epoch {epoch+1}/{epochs} - Loss: {loss.item():.4f} - Val Loss: {val_loss.item():.4f} - Val Acc: {val_acc:.4f}')
+        
+        return model
+    
+    def evaluate(self, model, X_test, y_test):
+        model.eval()
+        X_test_tensor = torch.FloatTensor(X_test).to(self.device)
+        
+        with torch.no_grad():
+            outputs = model(X_test_tensor)
+            preds = outputs.argmax(dim=1).cpu().numpy()
+        
+        acc = accuracy_score(y_test, preds)
+        prec = precision_score(y_test, preds)
+        rec = recall_score(y_test, preds)
+        f1 = f1_score(y_test, preds)
+        
+        print(f'\nTest Results:')
+        print(f'Accuracy:  {acc:.4f}')
+        print(f'Precision: {prec:.4f}')
+        print(f'Recall:    {rec:.4f}')
+        print(f'F1-Score:  {f1:.4f}')
+        
+        return acc, prec, rec, f1
+    
+    def run(self):
+        print("Step 1: Extract and Stack Features")
+        X_train, y_train, X_val, y_val, X_test, y_test = self.extract_or_load_features()
+        
+        print("\nStep 2: Feature Selection (RF + XGBoost Ensemble)")
+        X_train_sel, X_val_sel, X_test_sel, indices = select_features_ensemble(
+            X_train, y_train, X_val, X_test, k=self.k_features
         )
-        backs.append(m); dims.append(d)
-        print(f"[Backbone] {bcfg.name} -> dim {d}")
-    print(f"[Backbone] Stacked dim = {sum(dims)}")
-    # --- FEATURE EXTRACTION (with caching) ---
-    f_tr_path = out_dir / "F_tr.npy"; y_tr_path = out_dir / "y_tr.npy"
-    f_va_path = out_dir / "F_va.npy"; y_va_path = out_dir / "y_va.npy"
-    f_te_path = out_dir / "F_te.npy"; y_te_path = out_dir / "y_te.npy"
-    if not f_tr_path.exists():
-        F_tr, y_tr = extract_stacked_features(backs, tr_dl, device=device, use_amp=cfg.device.use_amp)
-        np.save(f_tr_path, F_tr); np.save(y_tr_path, y_tr)
-    else:
-     F_tr = np.load(f_tr_path); y_tr = np.load(y_tr_path)
+        
+        print("\nStep 3: Train Meta-Learner (MLP)")
+        model = self.train_meta_learner(X_train_sel, y_train, X_val_sel, y_val, epochs=50, lr=0.001)
+        
+        print("\nStep 4: Evaluate on Test Set")
+        self.evaluate(model, X_test_sel, y_test)
 
-
-    if not f_va_path.exists():
-        F_va, y_va = extract_stacked_features(backs, va_dl, device=device, use_amp=cfg.device.use_amp)
-        np.save(f_va_path, F_va); np.save(y_va_path, y_va)
-    else:
-        F_va = np.load(f_va_path); y_va = np.load(y_va_path)
-
-
-    if not f_te_path.exists():
-        F_te, y_te = extract_stacked_features(backs, te_dl, device=device, use_amp=cfg.device.use_amp)
-        np.save(f_te_path, F_te); np.save(y_te_path, y_te)
-    else:
-        F_te = np.load(f_te_path); y_te = np.load(y_te_path)
-
-
-    print(f"[Feat] Train {F_tr.shape}, Val {F_va.shape}, Test {F_te.shape}")
-    # --- FEATURE SELECTION ---
-    keep_idx = feature_selection_topk(
-    np.concatenate([F_tr, F_va], 0),
-    np.concatenate([y_tr, y_va], 0),
-    keep_frac=cfg.feature_selection.keep_frac,
-    subsample=cfg.feature_selection.subsample,
-    rank_cfg=cfg.feature_selection.rankers,
+if __name__ == '__main__':
+    trainer = Trainer(
+        data_dir='../Dataset',
+        batch_size=32,
+        device='cuda' if torch.cuda.is_available() else 'cpu',
+        k_features=1000
     )
-    np.save(out_dir / "keep_idx.npy", keep_idx)
-    print(f"[FS] Selected {len(keep_idx)} / {F_tr.shape[1]} ({cfg.feature_selection.keep_frac*100:.1f}%)")
-
-
-    F_tr_sel = F_tr[:, keep_idx]; F_va_sel = F_va[:, keep_idx]; F_te_sel = F_te[:, keep_idx]
-
-    # --- META MLP ---
-    # Dynamic per-epoch sampling rule: if n_train > 140k -> sample 20k per epoch; else keep config
-    n_train = F_tr_sel.shape[0]
-    effective_epoch_sample = 20000 if n_train > 140000 else cfg.meta_mlp.epoch_sample
-    if n_train > 140000:
-        print(f"[Meta] n_train={n_train} > 140000 → override epoch_sample=20000 per epoch")
-    else:
-        print(f"[Meta] n_train={n_train} ≤ 140000 → use config epoch_sample={effective_epoch_sample}")
-
-
-    save_path = str(Path(cfg.project.save_path))
-    meta = train_meta(
-    Xtr=F_tr_sel, ytr=y_tr,
-    Xva=F_va_sel, yva=y_va,
-    save_path=save_path,
-    epochs=cfg.meta_mlp.epochs,
-    batch_size=cfg.meta_mlp.batch_size,
-    lr=cfg.meta_mlp.lr,
-    weight_decay=cfg.meta_mlp.weight_decay,
-    dropout=cfg.meta_mlp.dropout,
-    epoch_sample=effective_epoch_sample, # <— apply dynamic rule here
-    stratified_epoch_sample=cfg.meta_mlp.stratified_epoch_sample,
-    use_amp=cfg.device.use_amp,
-    device=device,
-    )
-
-
-    # --- EVAL ---
-    evaluate_meta(meta, F_te_sel, y_te, batch_size=cfg.meta_mlp.batch_size, use_amp=cfg.device.use_amp, device=device)
+    trainer.run()
