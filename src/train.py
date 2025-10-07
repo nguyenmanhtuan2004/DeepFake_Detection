@@ -44,7 +44,7 @@ class Trainer:
         
         return X_train, y_train, X_val, y_val, X_test, y_test
     
-    def train_meta_learner(self, X_train, y_train, X_val, y_val, epochs=50, lr=0.001):
+    def train_meta_learner(self, X_train, y_train, X_val, y_val, epochs=200, lr=0.001):
         input_dim = X_train.shape[1]
         model = MetaLearnerMLP(input_dim=input_dim).to(self.device)
         criterion = nn.CrossEntropyLoss()
@@ -68,7 +68,7 @@ class Trainer:
             #     X_batch, y_batch = X_train, y_train
             
             X_train_tensor = torch.FloatTensor(X_train).to(self.device)
-            y_train_tensor = torch.LongTensor(X_train).to(self.device)
+            y_train_tensor = torch.LongTensor(y_train).to(self.device)
             
             model.train()
             optimizer.zero_grad()
@@ -136,7 +136,7 @@ class Trainer:
         )
         
         print("\nStep 3: Train Meta-Learner (MLP)")
-        model = self.train_meta_learner(X_train_sel, y_train, X_val_sel, y_val, epochs=50, lr=0.001)
+        model = self.train_meta_learner(X_train_sel, y_train, X_val_sel, y_val, epochs=100, lr=0.0005)
         
         print("\nStep 4: Evaluate on Test Set")
         self.evaluate(model, X_test_sel, y_test)
@@ -146,6 +146,6 @@ if __name__ == '__main__':
         data_dir='../Dataset',
         batch_size=32,
         device='cuda' if torch.cuda.is_available() else 'cpu',
-        k_features=1000
+        k_features=2000
     )
     trainer.run()
