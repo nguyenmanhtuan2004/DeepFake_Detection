@@ -48,16 +48,28 @@ class Trainer:
         input_dim = X_train.shape[1]
         model = MetaLearnerMLP(input_dim=input_dim).to(self.device)
         criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(model.parameters(), lr=lr)
+        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5, verbose=True)
         
-        X_train_tensor = torch.FloatTensor(X_train).to(self.device)
-        y_train_tensor = torch.LongTensor(y_train).to(self.device)
         X_val_tensor = torch.FloatTensor(X_val).to(self.device)
         y_val_tensor = torch.LongTensor(y_val).to(self.device)
+        
+        use_sampling = len(X_train) > 100000
+        sample_size = 20000 if use_sampling else len(X_train)
+        
         
         best_val_acc = 0
         
         for epoch in range(epochs):
+            # if use_sampling:
+            #     indices = np.random.choice(len(X_train), sample_size, replace=False)
+            #     X_batch, y_batch = X_train[indices], y_train[indices]
+            # else:
+            #     X_batch, y_batch = X_train, y_train
+            
+            X_train_tensor = torch.FloatTensor(X_train).to(self.device)
+            y_train_tensor = torch.LongTensor(X_train).to(self.device)
+            
             model.train()
             optimizer.zero_grad()
             outputs = model(X_train_tensor)
@@ -76,9 +88,13 @@ class Trainer:
                     best_val_acc = val_acc
                     torch.save(model.state_dict(), 'best_meta_learner.pth')
                 
+                scheduler.step(val_acc)
+                
                 if (epoch + 1) % 10 == 0:
-                    print(f'Epoch {epoch+1}/{epochs} - Loss: {loss.item():.4f} - Val Loss: {val_loss.item():.4f} - Val Acc: {val_acc:.4f}')
+                    print(f'Epoch {epoch+1}/{epochs} - Loss: {loss.item():.4f} - Val Loss: {val_loss.item():.4f} - Val Acc: {val_acc:.4f} - Best: {best_val_acc:.4f}')
         
+        print(f"\nBest validation accuracy: {best_val_acc:.4f}")
+        model.load_state_dict(torch.load('best_meta_learner.pth'))
         return model
     
     def evaluate(self, model, X_test, y_test):
@@ -105,6 +121,14 @@ class Trainer:
     def run(self):
         print("Step 1: Extract and Stack Features")
         X_train, y_train, X_val, y_val, X_test, y_test = self.extract_or_load_features()
+        
+        print("\nStep 1.5: Normalize Features")
+        from sklearn.preprocessing import StandardScaler
+        scaler = StandardScaler()
+        X_train = scaler.fit_transform(X_train)
+        X_val = scaler.transform(X_val)
+        X_test = scaler.transform(X_test)
+        print(f"Features normalized: mean=0, std=1")
         
         print("\nStep 2: Feature Selection (RF + XGBoost Ensemble)")
         X_train_sel, X_val_sel, X_test_sel, indices = select_features_ensemble(
