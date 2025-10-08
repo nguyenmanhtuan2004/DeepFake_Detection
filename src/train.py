@@ -34,9 +34,9 @@ class Trainer:
                 self.data_dir, self.batch_size, img_size=224, num_workers=4
             )
             
-            X_train, y_train = extract_and_stack_features(train_loader, self.device, use_b7=True)
-            X_val, y_val = extract_and_stack_features(val_loader, self.device, use_b7=True)
-            X_test, y_test = extract_and_stack_features(test_loader, self.device, use_b7=True)
+            X_train, y_train = extract_and_stack_features(train_loader, self.device)
+            X_val, y_val = extract_and_stack_features(val_loader, self.device)
+            X_test, y_test = extract_and_stack_features(test_loader, self.device)
             
             save_features(X_train, y_train, train_path)
             save_features(X_val, y_val, val_path)
@@ -149,7 +149,7 @@ class Trainer:
         )
         
         print("\nStep 3: Train Meta-Learner (MLP)")
-        model = self.train_meta_learner(X_train_sel, y_train, X_val_sel, y_val, epochs=100, lr=0.001, batch_size=512)
+        model = self.train_meta_learner(X_train_sel, y_train, X_val_sel, y_val, epochs=100, lr=0.0001, batch_size=512)
         
         print("\nStep 4: Evaluate on Test Set")
         self.evaluate(model, X_test_sel, y_test)
@@ -159,6 +159,6 @@ if __name__ == '__main__':
         data_dir='../Dataset',
         batch_size=32,
         device='cuda' if torch.cuda.is_available() else 'cpu',
-        k_features=3000  # Tăng lên vì EfficientNet-B7 có nhiều features hơn
+        k_features=2000
     )
     trainer.run()
