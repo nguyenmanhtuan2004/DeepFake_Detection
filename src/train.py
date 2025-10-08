@@ -18,31 +18,25 @@ class Trainer:
         self.feature_dir = 'features'
         os.makedirs(self.feature_dir, exist_ok=True)
         
-    def extract_or_load_features(self):
+    def extract_train_features(self):
         train_path = f'{self.feature_dir}/train_features.npz'
-        val_path = f'{self.feature_dir}/val_features.npz'
-        test_path = f'{self.feature_dir}/test_features.npz'
-        
-        if os.path.exists(train_path) and os.path.exists(val_path) and os.path.exists(test_path):
-            print("Loading saved features...")
+        if os.path.exists(train_path):
             X_train, y_train = load_features(train_path)
-            X_val, y_val = load_features(val_path)
-            X_test, y_test = load_features(test_path)
         else:
-            print("Extracting features from images...")
-            train_loader, val_loader, test_loader = create_dataloaders(
-                self.data_dir, self.batch_size, img_size=224, num_workers=4
-            )
-            
+            train_loader, _, _ = create_dataloaders(self.data_dir, self.batch_size, img_size=224, num_workers=4)
             X_train, y_train = extract_and_stack_features(train_loader, self.device)
-            X_val, y_val = extract_and_stack_features(val_loader, self.device)
-            X_test, y_test = extract_and_stack_features(test_loader, self.device)
-            
             save_features(X_train, y_train, train_path)
-            save_features(X_val, y_val, val_path)
-            save_features(X_test, y_test, test_path)
-        
-        return X_train, y_train, X_val, y_val, X_test, y_test
+        return X_train, y_train
+    
+    def extract_eval_features(self, split):
+        path = f'{self.feature_dir}/{split}_features.npz'
+        if os.path.exists(path):
+            return load_features(path)
+        _, val_loader, test_loader = create_dataloaders(self.data_dir, self.batch_size, img_size=224, num_workers=4)
+        loader = val_loader if split == 'val' else test_loader
+        X, y = extract_and_stack_features(loader, self.device)
+        save_features(X, y, path)
+        return X, y
     
     def train_meta_learner(self, X_train, y_train, X_val, y_val, epochs=200, lr=0.001, batch_size=256):
         input_dim = X_train.shape[1]
@@ -132,26 +126,35 @@ class Trainer:
         return acc, prec, rec, f1
     
     def run(self):
-        print("Step 1: Extract and Stack Features")
-        X_train, y_train, X_val, y_val, X_test, y_test = self.extract_or_load_features()
-        
-        print("\nStep 1.5: Normalize Features")
         from sklearn.preprocessing import StandardScaler
+        
+        print("Step 1: Extract Train Features")
+        X_train, y_train = self.extract_train_features()
+        print(f"Train: {X_train.shape}")
+        
+        print("\nStep 2: Normalize Features")
         scaler = StandardScaler()
         X_train = scaler.fit_transform(X_train)
+        
+        print("\nStep 3: Extract Val Features")
+        X_val, y_val = self.extract_eval_features('val')
         X_val = scaler.transform(X_val)
+        print(f"Val: {X_val.shape}")
+        
+        print("\nStep 4: Feature Selection")
+        indices = select_features_ensemble(X_train, y_train, k=self.k_features)
+        X_train_sel = X_train[:, indices]
+        X_val_sel = X_val[:, indices]
+        print(f"Selected: {X_train_sel.shape}")
+        
+        print("\nStep 5: Train Meta-Learner")
+        model = self.train_meta_learner(X_train_sel, y_train, X_val_sel, y_val, epochs=100, lr=0.001, batch_size=512)
+        
+        print("\nStep 6: Extract Test Features & Evaluate")
+        X_test, y_test = self.extract_eval_features('test')
         X_test = scaler.transform(X_test)
-        print(f"Features normalized: mean=0, std=1")
-        
-        print("\nStep 2: Feature Selection (RF + XGBoost Ensemble)")
-        X_train_sel, X_val_sel, X_test_sel, indices = select_features_ensemble(
-            X_train, y_train, X_val, X_test, k=self.k_features
-        )
-        
-        print("\nStep 3: Train Meta-Learner (MLP)")
-        model = self.train_meta_learner(X_train_sel, y_train, X_val_sel, y_val, epochs=100, lr=0.0001, batch_size=512)
-        
-        print("\nStep 4: Evaluate on Test Set")
+        X_test_sel = X_test[:, indices]
+        print(f"Test: {X_test_sel.shape}")
         self.evaluate(model, X_test_sel, y_test)
 
 if __name__ == '__main__':
