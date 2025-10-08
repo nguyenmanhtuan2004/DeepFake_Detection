@@ -48,7 +48,7 @@ class Trainer:
         input_dim = X_train.shape[1]
         model = MetaLearnerMLP(input_dim=input_dim).to(self.device)
         criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-3)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=10)
         
         # Create DataLoader cho mini-batch training
@@ -69,8 +69,6 @@ class Trainer:
         y_val_tensor = torch.LongTensor(y_val).to(self.device)
         
         best_val_acc = 0
-        patience_counter = 0
-        early_stop_patience = 20
         
         for epoch in range(epochs):
             # Training với mini-batches
@@ -99,16 +97,9 @@ class Trainer:
                 
                 if val_acc > best_val_acc:
                     best_val_acc = val_acc
-                    patience_counter = 0
                     torch.save(model.state_dict(), 'best_meta_learner.pth')
-                else:
-                    patience_counter += 1
                 
                 scheduler.step(val_acc)
-                
-                if patience_counter >= early_stop_patience:
-                    print(f'\nEarly stopping at epoch {epoch+1}')
-                    break
                 
                 if (epoch + 1) % 10 == 0:
                     print(f'Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss.item():.4f} - Val Acc: {val_acc:.4f} - Best: {best_val_acc:.4f}')
@@ -156,7 +147,7 @@ class Trainer:
         )
         
         print("\nStep 3: Train Meta-Learner (MLP)")
-        model = self.train_meta_learner(X_train_sel, y_train, X_val_sel, y_val, epochs=200, lr=0.001, batch_size=512)
+        model = self.train_meta_learner(X_train_sel, y_train, X_val_sel, y_val, epochs=100, lr=0.001, batch_size=512)
         
         print("\nStep 4: Evaluate on Test Set")
         self.evaluate(model, X_test_sel, y_test)
