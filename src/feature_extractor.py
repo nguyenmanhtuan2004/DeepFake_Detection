@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from tqdm import tqdm
-from models import XceptionFeatureExtractor, EfficientNetB3FeatureExtractor
+from models import XceptionFeatureExtractor, EfficientNetB3FeatureExtractor, EfficientNetB7FeatureExtractor
 
 def extract_features(model, dataloader, device):
     model.eval()
@@ -19,18 +19,27 @@ def extract_features(model, dataloader, device):
     labels = np.concatenate(labels_list)
     return features, labels
 
-def extract_and_stack_features(dataloader, device='cuda'):
+def extract_and_stack_features(dataloader, device='cuda', use_b7=False):
     xception = XceptionFeatureExtractor(pretrained=True).to(device)
-    efficientnet = EfficientNetB3FeatureExtractor(pretrained=True).to(device)
+    
+    if use_b7:
+        print("Using EfficientNet-B7 (larger model, better features)")
+        efficientnet = EfficientNetB7FeatureExtractor(pretrained=True).to(device)
+        model_name = "B7"
+    else:
+        print("Using EfficientNet-B3")
+        efficientnet = EfficientNetB3FeatureExtractor(pretrained=True).to(device)
+        model_name = "B3"
     
     print("Extracting Xception features...")
     xception_features, labels = extract_features(xception, dataloader, device)
     
-    print("Extracting EfficientNet-B3 features...")
+    print(f"Extracting EfficientNet-{model_name} features...")
     efficientnet_features, _ = extract_features(efficientnet, dataloader, device)
     
     stacked_features = np.hstack([xception_features, efficientnet_features])
     print(f"Stacked features shape: {stacked_features.shape}")
+ 
     
     return stacked_features, labels
 

@@ -34,9 +34,9 @@ class Trainer:
                 self.data_dir, self.batch_size, img_size=224, num_workers=4
             )
             
-            X_train, y_train = extract_and_stack_features(train_loader, self.device)
-            X_val, y_val = extract_and_stack_features(val_loader, self.device)
-            X_test, y_test = extract_and_stack_features(test_loader, self.device)
+            X_train, y_train = extract_and_stack_features(train_loader, self.device, use_b7=True)
+            X_val, y_val = extract_and_stack_features(val_loader, self.device, use_b7=True)
+            X_test, y_test = extract_and_stack_features(test_loader, self.device, use_b7=True)
             
             save_features(X_train, y_train, train_path)
             save_features(X_val, y_val, val_path)
@@ -69,6 +69,7 @@ class Trainer:
         y_val_tensor = torch.LongTensor(y_val).to(self.device)
         
         best_val_acc = 0
+        best_model_state = None
         
         for epoch in range(epochs):
             # Training với mini-batches
@@ -97,7 +98,7 @@ class Trainer:
                 
                 if val_acc > best_val_acc:
                     best_val_acc = val_acc
-                    torch.save(model.state_dict(), 'best_meta_learner.pth')
+                    best_model_state = model.state_dict().copy()
                 
                 scheduler.step(val_acc)
                 
@@ -105,7 +106,8 @@ class Trainer:
                     print(f'Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss.item():.4f} - Val Acc: {val_acc:.4f} - Best: {best_val_acc:.4f}')
         
         print(f"\nBest validation accuracy: {best_val_acc:.4f}")
-        model.load_state_dict(torch.load('best_meta_learner.pth'))
+        if best_model_state is not None:
+            model.load_state_dict(best_model_state)
         return model
     
     def evaluate(self, model, X_test, y_test):
@@ -157,6 +159,6 @@ if __name__ == '__main__':
         data_dir='../Dataset',
         batch_size=32,
         device='cuda' if torch.cuda.is_available() else 'cpu',
-        k_features=2500
+        k_features=3000  # Tăng lên vì EfficientNet-B7 có nhiều features hơn
     )
     trainer.run()
