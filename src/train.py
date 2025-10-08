@@ -31,7 +31,7 @@ class Trainer:
         else:
             print("Extracting features from images...")
             train_loader, val_loader, test_loader = create_dataloaders(
-                self.data_dir, self.batch_size, img_size=300, num_workers=4
+                self.data_dir, self.batch_size, img_size=224, num_workers=4
             )
             
             X_train, y_train = extract_and_stack_features(train_loader, self.device)
@@ -44,38 +44,51 @@ class Trainer:
         
         return X_train, y_train, X_val, y_val, X_test, y_test
     
-    def train_meta_learner(self, X_train, y_train, X_val, y_val, epochs=200, lr=0.001):
+    def train_meta_learner(self, X_train, y_train, X_val, y_val, epochs=200, lr=0.001, batch_size=256):
         input_dim = X_train.shape[1]
         model = MetaLearnerMLP(input_dim=input_dim).to(self.device)
         criterion = nn.CrossEntropyLoss()
         optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5, verbose=True)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=10)
+        
+        # Create DataLoader cho mini-batch training
+        from torch.utils.data import TensorDataset, DataLoader
+        train_dataset = TensorDataset(
+            torch.FloatTensor(X_train),
+            torch.LongTensor(y_train)
+        )
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=0,
+            pin_memory=True
+        )
         
         X_val_tensor = torch.FloatTensor(X_val).to(self.device)
         y_val_tensor = torch.LongTensor(y_val).to(self.device)
         
-        use_sampling = len(X_train) > 100000
-        sample_size = 20000 if use_sampling else len(X_train)
-        
-        
         best_val_acc = 0
+        patience_counter = 0
+        early_stop_patience = 20
         
         for epoch in range(epochs):
-            # if use_sampling:
-            #     indices = np.random.choice(len(X_train), sample_size, replace=False)
-            #     X_batch, y_batch = X_train[indices], y_train[indices]
-            # else:
-            #     X_batch, y_batch = X_train, y_train
-            
-            X_train_tensor = torch.FloatTensor(X_train).to(self.device)
-            y_train_tensor = torch.LongTensor(y_train).to(self.device)
-            
+            # Training với mini-batches
             model.train()
-            optimizer.zero_grad()
-            outputs = model(X_train_tensor)
-            loss = criterion(outputs, y_train_tensor)
-            loss.backward()
-            optimizer.step()
+            train_loss = 0.0
+            for X_batch, y_batch in train_loader:
+                X_batch = X_batch.to(self.device)
+                y_batch = y_batch.to(self.device)
+                
+                optimizer.zero_grad()
+                outputs = model(X_batch)
+                loss = criterion(outputs, y_batch)
+                loss.backward()
+                optimizer.step()
+                
+                train_loss += loss.item() * X_batch.size(0)
+            
+            train_loss /= len(X_train)
             
             model.eval()
             with torch.no_grad():
@@ -86,12 +99,19 @@ class Trainer:
                 
                 if val_acc > best_val_acc:
                     best_val_acc = val_acc
+                    patience_counter = 0
                     torch.save(model.state_dict(), 'best_meta_learner.pth')
+                else:
+                    patience_counter += 1
                 
                 scheduler.step(val_acc)
                 
+                if patience_counter >= early_stop_patience:
+                    print(f'\nEarly stopping at epoch {epoch+1}')
+                    break
+                
                 if (epoch + 1) % 10 == 0:
-                    print(f'Epoch {epoch+1}/{epochs} - Loss: {loss.item():.4f} - Val Loss: {val_loss.item():.4f} - Val Acc: {val_acc:.4f} - Best: {best_val_acc:.4f}')
+                    print(f'Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss.item():.4f} - Val Acc: {val_acc:.4f} - Best: {best_val_acc:.4f}')
         
         print(f"\nBest validation accuracy: {best_val_acc:.4f}")
         model.load_state_dict(torch.load('best_meta_learner.pth'))
@@ -136,7 +156,7 @@ class Trainer:
         )
         
         print("\nStep 3: Train Meta-Learner (MLP)")
-        model = self.train_meta_learner(X_train_sel, y_train, X_val_sel, y_val, epochs=100, lr=0.0005)
+        model = self.train_meta_learner(X_train_sel, y_train, X_val_sel, y_val, epochs=200, lr=0.001, batch_size=512)
         
         print("\nStep 4: Evaluate on Test Set")
         self.evaluate(model, X_test_sel, y_test)
@@ -146,6 +166,6 @@ if __name__ == '__main__':
         data_dir='../Dataset',
         batch_size=32,
         device='cuda' if torch.cuda.is_available() else 'cpu',
-        k_features=2000
+        k_features=2500
     )
     trainer.run()
