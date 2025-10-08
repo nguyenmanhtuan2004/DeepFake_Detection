@@ -4,41 +4,57 @@ import torch.optim as optim
 import numpy as np
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from data_loader import create_dataloaders
-from feature_extractor import extract_and_stack_features, save_features, load_features
+from feature_extractor_finetuned import extract_and_stack_features_finetuned, save_features, load_features
 from feature_selector import select_features_ensemble
 from models import MetaLearnerMLP
 import os
 
-class Trainer:
-    def __init__(self, data_dir, batch_size=32, device='cuda', feature_ratio=0.5):
+class FinetunedTrainer:
+    """
+    Train meta-learner using features extracted from FINE-TUNED models
+    (not frozen pretrained ImageNet models)
+    """
+    def __init__(self, data_dir, batch_size=32, device='cuda', feature_ratio=0.5,
+                 xception_ckpt='../baseline/xception_Dataset_best.pth',
+                 efficientnet_ckpt='../baseline/efficientnet_b3_Dataset_best.pth'):
         self.data_dir = data_dir
         self.batch_size = batch_size
         self.device = device
-        self.feature_ratio = feature_ratio  # 0.5 = 50% features
-        self.feature_dir = 'features'
+        self.feature_ratio = feature_ratio
+        self.xception_ckpt = xception_ckpt
+        self.efficientnet_ckpt = efficientnet_ckpt
+        self.feature_dir = 'features_finetuned'
         os.makedirs(self.feature_dir, exist_ok=True)
         
     def extract_train_features(self):
         train_path = f'{self.feature_dir}/train_features.npz'
         if os.path.exists(train_path):
+            print(f"Loading cached features from {train_path}")
             X_train, y_train = load_features(train_path)
         else:
             train_loader, _, _ = create_dataloaders(self.data_dir, self.batch_size, img_size=224, num_workers=4)
-            X_train, y_train = extract_and_stack_features(train_loader, self.device)
+            X_train, y_train = extract_and_stack_features_finetuned(
+                train_loader, self.device, 
+                self.xception_ckpt, self.efficientnet_ckpt
+            )
             save_features(X_train, y_train, train_path)
         return X_train, y_train
     
     def extract_eval_features(self, split):
         path = f'{self.feature_dir}/{split}_features.npz'
         if os.path.exists(path):
+            print(f"Loading cached features from {path}")
             return load_features(path)
         _, val_loader, test_loader = create_dataloaders(self.data_dir, self.batch_size, img_size=224, num_workers=4)
         loader = val_loader if split == 'val' else test_loader
-        X, y = extract_and_stack_features(loader, self.device)
+        X, y = extract_and_stack_features_finetuned(
+            loader, self.device,
+            self.xception_ckpt, self.efficientnet_ckpt
+        )
         save_features(X, y, path)
         return X, y
     
-    def train_meta_learner(self, X_train, y_train, X_val, y_val, epochs=200, lr=0.001, batch_size=256):
+    def train_meta_learner(self, X_train, y_train, X_val, y_val, epochs=100, lr=0.001, batch_size=512):
         input_dim = X_train.shape[1]
         model = MetaLearnerMLP(input_dim=input_dim).to(self.device)
         criterion = nn.CrossEntropyLoss()
@@ -99,7 +115,7 @@ class Trainer:
                 if (epoch + 1) % 10 == 0:
                     print(f'Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss.item():.4f} - Val Acc: {val_acc:.4f} - Best: {best_val_acc:.4f}')
         
-        print(f"\nBest validation accuracy: {best_val_acc:.4f}")
+        print(f"\n✅ Best validation accuracy: {best_val_acc:.4f}")
         if best_model_state is not None:
             model.load_state_dict(best_model_state)
         return model
@@ -117,7 +133,7 @@ class Trainer:
         rec = recall_score(y_test, preds)
         f1 = f1_score(y_test, preds)
         
-        print(f'\nTest Results:')
+        print(f'\n🎯 Test Results (Fine-tuned Features):')
         print(f'Accuracy:  {acc:.4f}')
         print(f'Precision: {prec:.4f}')
         print(f'Recall:    {rec:.4f}')
@@ -128,7 +144,11 @@ class Trainer:
     def run(self):
         from sklearn.preprocessing import StandardScaler
         
-        print("Step 1: Extract Train Features")
+        print("="*60)
+        print("🚀 Training with FINE-TUNED features (not frozen pretrained)")
+        print("="*60)
+        
+        print("\nStep 1: Extract Train Features from Fine-tuned Models")
         X_train, y_train = self.extract_train_features()
         print(f"Train: {X_train.shape}")
         
@@ -141,7 +161,7 @@ class Trainer:
         X_val = scaler.transform(X_val)
         print(f"Val: {X_val.shape}")
         
-        print("\nStep 4: Feature Selection (XGBoost only)")
+        print("\nStep 4: Feature Selection (XGBoost)")
         from xgboost import XGBClassifier
         k_features = int(X_train.shape[1] * self.feature_ratio)
         print(f"Selecting top {k_features} features ({self.feature_ratio*100:.0f}%)")
@@ -152,7 +172,7 @@ class Trainer:
         X_val_sel = X_val[:, indices]
         print(f"Selected: {X_train_sel.shape}")
         
-        print("\nStep 5: Train Meta-Learner")
+        print("\nStep 5: Train Meta-Learner MLP")
         model = self.train_meta_learner(X_train_sel, y_train, X_val_sel, y_val, epochs=100, lr=0.001, batch_size=512)
         
         print("\nStep 6: Extract Test Features & Evaluate")
@@ -163,10 +183,12 @@ class Trainer:
         self.evaluate(model, X_test_sel, y_test)
 
 if __name__ == '__main__':
-    trainer = Trainer(
+    trainer = FinetunedTrainer(
         data_dir='../Dataset',
         batch_size=32,
         device='cuda' if torch.cuda.is_available() else 'cpu',
-        feature_ratio=0.5  # 50% of 3584 = 1792 features
+        feature_ratio=0.5,  # 50% of 3584 = 1792 features
+        xception_ckpt='../baseline/xception_Dataset_best.pth',
+        efficientnet_ckpt='../baseline/efficientnet_b3_Dataset_best.pth'
     )
     trainer.run()
