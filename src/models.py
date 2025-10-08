@@ -24,7 +24,8 @@ class EfficientNetB3FeatureExtractor(nn.Module):
 class EfficientNetB7FeatureExtractor(nn.Module):
     def __init__(self, pretrained=True):
         super().__init__()
-        self.model = timm.create_model('efficientnet_b7', pretrained=pretrained)
+        # Dùng tf_efficientnet_b7 vì có pretrained weights
+        self.model = timm.create_model('tf_efficientnet_b7', pretrained=pretrained)
         self.model.classifier = nn.Identity()
         
     def forward(self, x):
