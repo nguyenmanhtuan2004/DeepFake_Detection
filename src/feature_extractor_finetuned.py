@@ -17,11 +17,19 @@ class FinetunedXceptionFeatureExtractor(nn.Module):
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
         self.model.load_state_dict(checkpoint['model'])
         
-        # Remove final FC layer to get features
-        self.model.fc = nn.Identity()
+        # Extract features BEFORE classifier (timm uses 'fc' or 'classifier')
+        backbone = self.model.backbone
+        if hasattr(backbone, 'fc') and isinstance(backbone.fc, nn.Linear):
+            backbone.fc = nn.Identity()
+        elif hasattr(backbone, 'classifier') and isinstance(backbone.classifier, nn.Linear):
+            backbone.classifier = nn.Identity()
+        elif hasattr(backbone, 'head') and isinstance(backbone.head, nn.Linear):
+            backbone.head = nn.Identity()
+        
         print(f"Loaded fine-tuned Xception from {checkpoint_path}")
         print(f"  - Epoch: {checkpoint.get('epoch', 'N/A')}")
         print(f"  - Val Acc: {checkpoint.get('val_acc', 'N/A'):.4f}")
+        print(f"  - Num features: {self.model.num_features}")
         
     def forward(self, x):
         return self.model(x)
@@ -35,11 +43,19 @@ class FinetunedEfficientNetB3FeatureExtractor(nn.Module):
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
         self.model.load_state_dict(checkpoint['model'])
         
-        # Remove final classifier to get features
-        self.model.classifier = nn.Identity()
+        # Extract features BEFORE classifier (timm uses 'classifier')
+        backbone = self.model.backbone
+        if hasattr(backbone, 'classifier') and isinstance(backbone.classifier, nn.Linear):
+            backbone.classifier = nn.Identity()
+        elif hasattr(backbone, 'fc') and isinstance(backbone.fc, nn.Linear):
+            backbone.fc = nn.Identity()
+        elif hasattr(backbone, 'head') and isinstance(backbone.head, nn.Linear):
+            backbone.head = nn.Identity()
+        
         print(f"Loaded fine-tuned EfficientNet-B3 from {checkpoint_path}")
         print(f"  - Epoch: {checkpoint.get('epoch', 'N/A')}")
         print(f"  - Val Acc: {checkpoint.get('val_acc', 'N/A'):.4f}")
+        print(f"  - Num features: {self.model.num_features}")
         
     def forward(self, x):
         return self.model(x)
