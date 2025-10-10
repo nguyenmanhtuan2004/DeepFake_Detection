@@ -15,7 +15,7 @@ class Trainer:
         self.batch_size = batch_size
         self.device = device
         self.feature_ratio = feature_ratio  # 0.5 = 50% features
-        self.feature_dir = 'features'
+        self.feature_dir = 'features_finetuned'
         os.makedirs(self.feature_dir, exist_ok=True)
         
     def extract_train_features(self):

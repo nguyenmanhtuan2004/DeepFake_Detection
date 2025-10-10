@@ -58,8 +58,20 @@ class FinetunedTrainer:
         input_dim = X_train.shape[1]
         model = MetaLearnerMLP(input_dim=input_dim).to(self.device)
         criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-3)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=10)
+        
+        # SGD with momentum: ổn định và hiệu quả cho classification
+        optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=1e-4, nesterov=True)
+        
+        # OneCycleLR: tăng lr lên max rồi giảm dần (hội tụ nhanh)
+        steps_per_epoch = (len(X_train) + batch_size - 1) // batch_size
+        total_steps = steps_per_epoch * epochs
+        scheduler = optim.lr_scheduler.OneCycleLR(
+            optimizer, 
+            max_lr=lr,
+            total_steps=total_steps,
+            pct_start=0.3,
+            anneal_strategy='cos'
+        )
         
         # Create DataLoader cho mini-batch training
         from torch.utils.data import TensorDataset, DataLoader
@@ -94,6 +106,7 @@ class FinetunedTrainer:
                 loss = criterion(outputs, y_batch)
                 loss.backward()
                 optimizer.step()
+                scheduler.step()  # OneCycleLR step mỗi batch
                 
                 train_loss += loss.item() * X_batch.size(0)
             
@@ -109,8 +122,6 @@ class FinetunedTrainer:
                 if val_acc > best_val_acc:
                     best_val_acc = val_acc
                     best_model_state = model.state_dict().copy()
-                
-                scheduler.step(val_acc)
                 
                 if (epoch + 1) % 10 == 0:
                     print(f'Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss.item():.4f} - Val Acc: {val_acc:.4f} - Best: {best_val_acc:.4f}')
@@ -144,10 +155,6 @@ class FinetunedTrainer:
     def run(self):
         from sklearn.preprocessing import StandardScaler
         
-        print("="*60)
-        print("🚀 Training with FINE-TUNED features (not frozen pretrained)")
-        print("="*60)
-        
         print("\nStep 1: Extract Train Features from Fine-tuned Models")
         X_train, y_train = self.extract_train_features()
         print(f"Train: {X_train.shape}")
@@ -172,7 +179,7 @@ class FinetunedTrainer:
         X_val_sel = X_val[:, indices]
         print(f"Selected: {X_train_sel.shape}")
         
-        print("\nStep 5: Train Meta-Learner MLP")
+        print("\nStep 5: Train Meta-Learner MLP (SGD + OneCycleLR)")
         model = self.train_meta_learner(X_train_sel, y_train, X_val_sel, y_val, epochs=100, lr=0.001, batch_size=512)
         
         print("\nStep 6: Extract Test Features & Evaluate")
@@ -187,7 +194,7 @@ if __name__ == '__main__':
         data_dir='../Dataset',
         batch_size=32,
         device='cuda' if torch.cuda.is_available() else 'cpu',
-        feature_ratio=0.5,  # 50% of 3584 = 1792 features
+        feature_ratio=0.6,  
         xception_ckpt='../baseline/xception_Dataset_best.pth',
         efficientnet_ckpt='../baseline/efficientnet_b3_Dataset_best.pth'
     )
