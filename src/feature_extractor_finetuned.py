@@ -12,26 +12,36 @@ class FinetunedXceptionFeatureExtractor(nn.Module):
     """Load fine-tuned Xception and extract features before final FC layer"""
     def __init__(self, checkpoint_path):
         super().__init__()
-        # Load fine-tuned model (wrapper chứa self.backbone là timm model)
+        # Load fine-tuned model với num_classes=2 để load checkpoint
         wrapper = Xception(num_classes=2, pretrained=False)
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
         wrapper.load_state_dict(checkpoint['model'])
         
-        # Lấy timm backbone bên trong wrapper
-        self.backbone = wrapper.backbone
+        # Tạo model MỚI với num_classes=0 để trích xuất features
+        # timm sẽ tự động loại bỏ classifier khi num_classes=0
+        import timm
+        model_name = wrapper.model_name
+        self.backbone = timm.create_model(
+            model_name,
+            pretrained=False,
+            num_classes=0,  # ← Quan trọng: num_classes=0 để lấy features!
+            global_pool="avg"
+        )
         
-        # Thay FC layer của timm model bằng Identity
-        if hasattr(self.backbone, 'fc') and isinstance(self.backbone.fc, nn.Linear):
-            self.backbone.fc = nn.Identity()
-        elif hasattr(self.backbone, 'classifier') and isinstance(self.backbone.classifier, nn.Linear):
-            self.backbone.classifier = nn.Identity()
-        elif hasattr(self.backbone, 'head') and isinstance(self.backbone.head, nn.Linear):
-            self.backbone.head = nn.Identity()
+        # Copy weights từ fine-tuned model (trừ classifier head)
+        wrapper_state = wrapper.backbone.state_dict()
+        model_state = self.backbone.state_dict()
         
+        # Chỉ copy các layers có shape giống nhau (bỏ qua classifier)
+        filtered_state = {k: v for k, v in wrapper_state.items() 
+                         if k in model_state and v.shape == model_state[k].shape}
+        self.backbone.load_state_dict(filtered_state, strict=False)
+        
+        num_features = self.backbone.num_features
         print(f"Loaded fine-tuned Xception from {checkpoint_path}")
         print(f"  - Epoch: {checkpoint.get('epoch', 'N/A')}")
         print(f"  - Val Acc: {checkpoint.get('val_acc', 'N/A'):.4f}")
-        print(f"  - Num features: {wrapper.num_features}")
+        print(f"  - Num features: {num_features}")
         
     def forward(self, x):
         return self.backbone(x)
@@ -40,26 +50,36 @@ class FinetunedEfficientNetB3FeatureExtractor(nn.Module):
     """Load fine-tuned EfficientNet-B3 and extract features before final FC layer"""
     def __init__(self, checkpoint_path):
         super().__init__()
-        # Load fine-tuned model (wrapper chứa self.backbone là timm model)
+        # Load fine-tuned model với num_classes=2 để load checkpoint
         wrapper = EfficientNetB3(num_classes=2, pretrained=False)
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
         wrapper.load_state_dict(checkpoint['model'])
         
-        # Lấy timm backbone bên trong wrapper
-        self.backbone = wrapper.backbone
+        # Tạo model MỚI với num_classes=0 để trích xuất features
+        # timm sẽ tự động loại bỏ classifier khi num_classes=0
+        import timm
+        model_name = wrapper.model_name
+        self.backbone = timm.create_model(
+            model_name,
+            pretrained=False,
+            num_classes=0,  # ← Quan trọng: num_classes=0 để lấy features!
+            global_pool="avg"
+        )
         
-        # Thay FC layer của timm model bằng Identity
-        if hasattr(self.backbone, 'classifier') and isinstance(self.backbone.classifier, nn.Linear):
-            self.backbone.classifier = nn.Identity()
-        elif hasattr(self.backbone, 'fc') and isinstance(self.backbone.fc, nn.Linear):
-            self.backbone.fc = nn.Identity()
-        elif hasattr(self.backbone, 'head') and isinstance(self.backbone.head, nn.Linear):
-            self.backbone.head = nn.Identity()
+        # Copy weights từ fine-tuned model (trừ classifier head)
+        wrapper_state = wrapper.backbone.state_dict()
+        model_state = self.backbone.state_dict()
         
+        # Chỉ copy các layers có shape giống nhau (bỏ qua classifier)
+        filtered_state = {k: v for k, v in wrapper_state.items() 
+                         if k in model_state and v.shape == model_state[k].shape}
+        self.backbone.load_state_dict(filtered_state, strict=False)
+        
+        num_features = self.backbone.num_features
         print(f"Loaded fine-tuned EfficientNet-B3 from {checkpoint_path}")
         print(f"  - Epoch: {checkpoint.get('epoch', 'N/A')}")
         print(f"  - Val Acc: {checkpoint.get('val_acc', 'N/A'):.4f}")
-        print(f"  - Num features: {wrapper.num_features}")
+        print(f"  - Num features: {num_features}")
         
     def forward(self, x):
         return self.backbone(x)
@@ -90,13 +110,15 @@ def extract_and_stack_features_finetuned(dataloader, device='cuda',
     
     print("\nExtracting Xception features (fine-tuned)...")
     xception_features, labels = extract_features(xception, dataloader, device)
+    print(f"  → Xception features shape: {xception_features.shape}")
     
     print("Extracting EfficientNet-B3 features (fine-tuned)...")
     efficientnet_features, _ = extract_features(efficientnet, dataloader, device)
+    print(f"  → EfficientNet features shape: {efficientnet_features.shape}")
     
     # Stack features
     stacked_features = np.hstack([xception_features, efficientnet_features])
-    print(f"Stacked features shape: {stacked_features.shape}")
+    print(f"  → Stacked features shape: {stacked_features.shape}")
     
     return stacked_features, labels
 

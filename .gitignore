@@ -42,7 +42,7 @@ logs/
 outputs/
 runs/
 wandb/
-features/
+features_fintuned/
 
 # Temporary files
 *.tmp
