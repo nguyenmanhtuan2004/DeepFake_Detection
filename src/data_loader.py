@@ -63,23 +63,18 @@ class DeepfakeDataset(Dataset):
 
 
 def get_transforms(img_size=224, augment=True):
-    """
-    Tạo transforms cho train và validation
-    
-    Args:
-        img_size: kích thước ảnh đầu vào (default 224 cho EfficientNet-B3)
-        augment: có sử dụng augmentation không (cho train)
-    """
+    mean, std = [0.485,0.456,0.406], [0.229,0.224,0.225]
+    base_resize = transforms.Resize(int(img_size*1.15), interpolation=transforms.InterpolationMode.BILINEAR)
     if augment:
         # Transform cho training (có augmentation)
         transform = transforms.Compose([
-            transforms.Resize((img_size, img_size)),
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomRotation(10),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+            base_resize,
+            transforms.RandomCrop(img_size),
+            transforms.RandAugment(num_ops=2, magnitude=9),
+            transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], 
-                               std=[0.229, 0.224, 0.225])
+            transforms.Normalize(mean, std),
+            transforms.RandomErasing(p=0.25, scale=(0.02, 0.2)),
         ])
     else:
         # Transform cho validation/test (không augmentation)

@@ -123,7 +123,7 @@ class FinetunedTrainer:
                     best_val_acc = val_acc
                     best_model_state = model.state_dict().copy()
                 
-                if (epoch + 1) % 10 == 0:
+                if (epoch + 1) % 5 == 0:
                     print(f'Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss.item():.4f} - Val Acc: {val_acc:.4f} - Best: {best_val_acc:.4f}')
         
         print(f"\n✅ Best validation accuracy: {best_val_acc:.4f}")
@@ -137,8 +137,10 @@ class FinetunedTrainer:
         
         with torch.no_grad():
             outputs = model(X_test_tensor)
-            preds = outputs.argmax(dim=1).cpu().numpy()
+            probs = torch.softmax(outputs, dim=1)[:, 1]
         
+        thresh=0.7
+        preds = (probs.cpu().numpy() > thresh).astype(int)
         acc = accuracy_score(y_test, preds)
         prec = precision_score(y_test, preds)
         rec = recall_score(y_test, preds)
@@ -172,7 +174,16 @@ class FinetunedTrainer:
         from xgboost import XGBClassifier
         k_features = int(X_train.shape[1] * self.feature_ratio)
         print(f"Selecting top {k_features} features ({self.feature_ratio*100:.0f}%)")
-        xgb = XGBClassifier(n_estimators=100, random_state=42, tree_method='hist', device='cuda')
+        xgb = XGBClassifier(
+            n_estimators=200, 
+            max_depth=6,
+            learning_rate=0.001,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=42, 
+            tree_method='hist', 
+            device='cuda'
+        )
         xgb.fit(X_train, y_train)
         indices = np.argsort(xgb.feature_importances_)[::-1][:k_features]
         X_train_sel = X_train[:, indices]
@@ -180,19 +191,44 @@ class FinetunedTrainer:
         print(f"Selected: {X_train_sel.shape}")
         
         print("\nStep 5: Train Meta-Learner MLP (SGD + OneCycleLR)")
-        model = self.train_meta_learner(X_train_sel, y_train, X_val_sel, y_val, epochs=100, lr=0.001, batch_size=512)
+        model = self.train_meta_learner(X_train_sel, y_train, X_val_sel, y_val, epochs=50, lr=0.0001, batch_size=512)
         
-        print("\nStep 6: Extract Test Features & Evaluate")
+        # Save ensemble model
+        print("\n💾 Saving ensemble model...")
+        save_path = 'ensemble_finetuned_best.pth'
+        torch.save({
+            'model_state_dict': model.state_dict(),
+            'scaler': scaler,
+            'selected_indices': indices,
+            'input_dim': X_train_sel.shape[1],
+            'feature_ratio': self.feature_ratio,
+            'xception_ckpt': self.xception_ckpt,
+            'efficientnet_ckpt': self.efficientnet_ckpt
+        }, save_path)
+        print(f"✅ Saved to {save_path}")
+        
+        print("\nStep 6: Load ensemble model and Evaluate on Test Set")
+        checkpoint = torch.load(save_path, map_location=self.device, weights_only=False)
+        model = MetaLearnerMLP(input_dim=checkpoint['input_dim']).to(self.device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        scaler = checkpoint['scaler']
+        indices = checkpoint['selected_indices']
+        print("✅ Model + Scaler + Feature Indices loaded!")
+
         X_test, y_test = self.extract_eval_features('test')
         X_test = scaler.transform(X_test)
         X_test_sel = X_test[:, indices]
         print(f"Test: {X_test_sel.shape}")
-        self.evaluate(model, X_test_sel, y_test)
-
+        
+        # Evaluate và lưu test_acc vào checkpoint
+        test_acc, prec, rec, f1 = self.evaluate(model, X_test_sel, y_test)
+        checkpoint['test_acc'] = test_acc
+        torch.save(checkpoint, save_path)
+        print(f"✅ Updated {save_path} with test_acc: {test_acc:.4f}")
 if __name__ == '__main__':
     trainer = FinetunedTrainer(
         data_dir='../Dataset',
-        batch_size=32,
+        batch_size=64,
         device='cuda' if torch.cuda.is_available() else 'cpu',
         feature_ratio=0.6,  
         xception_ckpt='../baseline/xception_Dataset_best.pth',
