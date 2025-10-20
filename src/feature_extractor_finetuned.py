@@ -14,7 +14,7 @@ class FinetunedXceptionFeatureExtractor(nn.Module):
         super().__init__()
         # Load fine-tuned model với num_classes=2 để load checkpoint
         wrapper = Xception(num_classes=2, pretrained=False)
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         wrapper.load_state_dict(checkpoint['model'])
         
         # Tạo model MỚI với num_classes=0 để trích xuất features
@@ -52,7 +52,7 @@ class FinetunedEfficientNetB3FeatureExtractor(nn.Module):
         super().__init__()
         # Load fine-tuned model với num_classes=2 để load checkpoint
         wrapper = EfficientNetB3(num_classes=2, pretrained=False)
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         wrapper.load_state_dict(checkpoint['model'])
         
         # Tạo model MỚI với num_classes=0 để trích xuất features
