@@ -44,7 +44,6 @@ class DeepfakeDataset(Dataset):
             for img_path in class_dir.glob('*.jpg'):
                 self.samples.append((str(img_path), label))
         
-        print(f"Loaded {len(self.samples)} samples from {split_dir}")
     
     def __len__(self):
         return len(self.samples)

@@ -39,8 +39,6 @@ class FinetunedXceptionFeatureExtractor(nn.Module):
         
         num_features = self.backbone.num_features
         print(f"Loaded fine-tuned Xception from {checkpoint_path}")
-        print(f"  - Epoch: {checkpoint.get('epoch', 'N/A')}")
-        print(f"  - Val Acc: {checkpoint.get('val_acc', 'N/A'):.4f}")
         print(f"  - Num features: {num_features}")
         
     def forward(self, x):
@@ -77,8 +75,6 @@ class FinetunedEfficientNetB3FeatureExtractor(nn.Module):
         
         num_features = self.backbone.num_features
         print(f"Loaded fine-tuned EfficientNet-B3 from {checkpoint_path}")
-        print(f"  - Epoch: {checkpoint.get('epoch', 'N/A')}")
-        print(f"  - Val Acc: {checkpoint.get('val_acc', 'N/A'):.4f}")
         print(f"  - Num features: {num_features}")
         
     def forward(self, x):

@@ -69,6 +69,7 @@ class EfficientNetB3(nn.Module):
                 num_classes=num_classes,
                 drop_rate=dropout,
                 drop_path_rate=drop_connect_rate,
+                acti_layer=nn.SiLU,
                 global_pool="avg",
             )
         except Exception as ex:
