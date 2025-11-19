@@ -48,7 +48,7 @@ class EfficientNetB3(nn.Module):
         model_name: str | None = None,   
     ):
         super().__init__()
-        h
+        # Đăng ký trước để mọi replica (nếu có) đều có thuộc tính
         self.backbone = nn.Identity()
         self.model_name = model_name or ""
 
