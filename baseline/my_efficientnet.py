@@ -6,7 +6,7 @@ import torch.nn as nn
 __all__ = ["EfficientNetB3", "create_model", "EfficientNetB3_pretrained"]
 
 # Các tên model "an toàn" trên nhiều version timm (không bắt buộc tf_*_ns)
-_SAFE_CANDIDATES = ("efficientnet_b3", "tf_efficientnet_b3")
+_SAFE_CANDIDATES = ("tf_efficientnet_b3_ns","efficientnet_b3", "tf_efficientnet_b3")
 
 def _pick_model_name(timm, preferred: str | None):
     avail = set(timm.list_models())
@@ -45,10 +45,10 @@ class EfficientNetB3(nn.Module):
         dropout: float = 0.3,
         pretrained: bool = True,
         freeze_backbone: bool = False,
-        model_name: str | None = None,   # ép tên cụ thể nếu muốn
+        model_name: str | None = None,   
     ):
         super().__init__()
-        # Đăng ký trước để mọi replica (nếu có) đều có thuộc tính
+        h
         self.backbone = nn.Identity()
         self.model_name = model_name or ""
 
@@ -69,7 +69,6 @@ class EfficientNetB3(nn.Module):
                 num_classes=num_classes,
                 drop_rate=dropout,
                 drop_path_rate=drop_connect_rate,
-                acti_layer=nn.SiLU,
                 global_pool="avg",
             )
         except Exception as ex:
